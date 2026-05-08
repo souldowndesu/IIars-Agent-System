@@ -1,6 +1,5 @@
 from openai import AsyncOpenAI
 import dotenv,os
-import asyncio
 dotenv.load_dotenv()
 
 class AsyncLLM:
