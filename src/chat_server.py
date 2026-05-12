@@ -118,7 +118,7 @@ class ChatApp: #转发端口
                     asyncio.create_task(safe_cleanup())
                     
             return StreamingResponse(event_generator(),media_type="text/event-stream")  #会不断返回实例化的event_generator,即对应得迭代器      
-        
+         
     @asynccontextmanager
     async def lifespan(self, app: FastAPI):#yield前会执行一次，断开服务后会执行之后的
         stop_cleanup = asyncio.Event()
@@ -150,11 +150,28 @@ class ChatApp: #转发端口
                 "prompt":user_input
                 })
             self.session_manager.update_activity(session_id) 
-            async for res_word in llm.chat_stream(user_input=user_input):
-                await self.broadcaster.broadcast(session_id,{
-                    "event":"content",
-                    "data":res_word
-                })
+            async for res in llm.chat_stream(user_input=user_input):
+                event_type = res.get("type")    #获取具体执行结果类型
+                
+                if event_type == "content":
+                    await self.broadcaster.broadcast(session_id, {
+                        "event":"content",
+                        "data":res["data"]
+                    })
+                elif event_type == "tool_start":
+                    await self.broadcaster.broadcast(session_id, {
+                        "event":"tool_status",
+                        "status":"start",
+                        "name":res["name"]
+                    })
+                elif event_type == "tool_result":     #需要考虑这个的必要性，也许直接返回执行结果就行了
+                    await self.broadcaster.broadcast(session_id, {
+                        "event":"tool_status",
+                        "status":"result",
+                        "name":res["name"],
+                        "executed_well":res["result_status"]
+                    })
+                
             await self.broadcaster.broadcast(session_id,{
                 "event":"end",
             })
