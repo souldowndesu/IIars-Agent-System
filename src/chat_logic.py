@@ -84,15 +84,21 @@ class AsyncLLM:
             )
         
             full_reply = ""
+            reasoning_reply = ""
             tool_calls_buffer = {}   #存放碎片化的tool calls
             
             async for chunk in resp:
                 if not chunk.choices: 
                     continue    #去除空块
                 delta = chunk.choices[0].delta
+                
+                if hasattr(delta,'reasoning_content') and delta.reasoning_content:
+                    reasoning_reply += delta.reasoning_content
+                
                 if delta.content:
                     word = delta.content
                     full_reply += word
+                    print(word, end="", flush=True)
                     yield {"type":"content","data":word}
                 
                 if delta.tool_calls: #出现了工具调用的请求
@@ -104,11 +110,16 @@ class AsyncLLM:
                                 "name":tc_delta.function.name,
                                 "args":""
                             }
+                            print(f"\n\n[System] Model is calling tool: {tc_delta.function.name} -> ", end="", flush=True)
                             yield {"type":"tool_start","name":tool_calls_buffer[index]["name"]}  #只在第一次出现该工具时输出
                         if tc_delta.function.arguments:
                             tool_calls_buffer[index]["args"] += tc_delta.function.arguments #逐渐拼接tool_call的内容
                             
             assistant_msg = {"role":"assistant","content":full_reply or None}
+            
+            if reasoning_reply:
+                assistant_msg["reasoning_content"] = reasoning_reply
+            
             if tool_calls_buffer: #有调用工具
                 formatted_calls = []
                 for tc in tool_calls_buffer.values():
@@ -140,6 +151,8 @@ class AsyncLLM:
                     except Exception as e:
                         result_str = f"Error executing {func_name} :{str(e)}"   #将结果返回模型
                         executed_well = False
+                        
+                    print(f"[Tool Result] {result_str}", flush=True)    
 
                     yield {"type":"tool_result","name": func_name,"result_status":executed_well}
                     
