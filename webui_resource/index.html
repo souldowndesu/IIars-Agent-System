@@ -9,7 +9,10 @@
 <body>
     <div class="app-container">
         <aside class="sidebar">
-            <button id="new-chat-btn" class="primary-btn">+ 新建对话</button>
+            <div class="sidebar-actions">
+                <button id="new-chat-btn" class="primary-btn">+ 新建临时对话</button>
+                <button id="clean-temp-btn" class="secondary-btn" disabled>🧹 清理临时对话</button>
+            </div>
             <div class="chat-list-container">
                 <ul id="chat-list">
                     </ul>
@@ -18,9 +21,18 @@
 
         <main class="chat-area">
             <div id="chat-header" class="chat-header">
-                <h2 id="current-session-title">当前无选择的对话</h2>
+                <h2 id="current-session-title">⭐ 主对话</h2>
+                <button id="compact-btn" class="compact-trigger-btn" title="压缩当前主会话的记忆">🧠 压缩记忆</button>
             </div>
             
+            <div id="compact-panel" class="compact-panel">
+                <div class="compact-panel-header">
+                    <span>🧠 记忆压缩</span>
+                    <span id="compact-status" class="compact-status">等待中...</span>
+                </div>
+                <div id="compact-content" class="compact-content"></div>
+            </div>
+
             <div id="messages-container" class="messages-container">
                 </div>
 

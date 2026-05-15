@@ -3,10 +3,15 @@ import dotenv,os,aiofiles,json,asyncio,inspect
 from typing import List,Dict,Any,Callable
 import importlib.util
 import logging
+import aiosqlite
+import time
 
 dotenv.load_dotenv()
 
 logger = logging.getLogger(__name__)
+
+MAIN_DB_PATH = "history/main_chat.db"
+COMPACT_DB_PATH = "history/compact_chat.db"
 
 class ToolRegistry:
     def __init__(self):
@@ -59,6 +64,9 @@ class ToolRegistry:
             return await asyncio.to_thread(func, **args)
 
 class AsyncLLM:
+    # 压缩专用的系统提示词，直接内置于类中
+    COMPACT_SYSTEM_PROMPT = "你是一个优秀的上下文总结专家。请对上述提供的对话记录进行高度提炼压缩，提取出核心事实、用户意图、已解决的结论，并舍弃所有无意义的寒暄。以简明扼要的陈述句返回。"
+
     def __init__(self,api_key:str=None,model:str=None,base_url:str=None,registry:ToolRegistry=None):
         self.client = AsyncOpenAI(
             api_key=api_key or os.getenv("API_KEY"),
@@ -68,15 +76,24 @@ class AsyncLLM:
         
         self.history_dir = "history"
         os.makedirs(self.history_dir,exist_ok=True)
-        self.messages = [{"role":"system","content":"你是一个助理，帮助用户解决基本的问题，请不要使用特殊字符或表情符，必要的时候可以调用工具"}]
         
-        self.registry = registry    #注册的tools  
+        self.messages = [{"role":"system","content":"你是一个助理，帮助用户解决基本的问题，请不要使用特殊字符或表情符，必要的时候可以调用工具"}]
+        self.timestamps = [time.time()]
+        
+        self.registry = registry    #注册的tools 
+        self._saved_index = 0   #已经保存的数量,防止重复保存,标记了messages中保存过的数量
+        
+        #压缩的起始终止时间，0为异常值，可判别是否成功
+        self.compact_start_time = 0.0
+        self.compact_end_time = 0.0
     
     async def chat_stream(self,user_input:str=None,message:dict=None):
         if user_input:
             self.messages.append({"role":"user","content":user_input})
+            self.timestamps.append(time.time())
         elif message:
             self.messages.append(message)
+            self.timestamps.append(time.time())
         
         while True:
             resp = await self.client.chat.completions.create(
@@ -132,6 +149,7 @@ class AsyncLLM:
                     })
                 assistant_msg["tool_calls"] = formatted_calls
                 self.messages.append(assistant_msg)
+                self.timestamps.append(time.time())
                 
                 for tc in formatted_calls:
                     func_name = tc["function"]["name"]
@@ -146,7 +164,7 @@ class AsyncLLM:
                     try:
                         args = json.loads(args_str) if args_str else {} #这里有一个防御性措施，防止非法json，也许可以调用修复模型对其进行更改
                         result_data = await self.registry.execute(func_name,args)
-                        # 对 dict/list 结果使用格式化 JSON，便于前端在终端面板中展示
+                        # 对dict/list结果使用格式化JSON，便于前端在终端面板中展示
                         if isinstance(result_data, (dict, list)):
                             result_str = json.dumps(result_data,ensure_ascii=False,indent=2)
                         else:
@@ -169,26 +187,132 @@ class AsyncLLM:
                         "name":func_name,
                         "content":result_str
                     })
+                    self.timestamps.append(time.time())
                 continue #循环执行，直到完成完整链路
                 
             else:   #没有工具调用
                 self.messages.append(assistant_msg)
+                self.timestamps.append(time.time())
                 break   #此时不必继续循环
                 
         
-    async def load_history(self,session_id:str):
-        file_path = os.path.join(self.history_dir,f"{session_id}.json")
-        if os.path.exists(file_path):
-            async with aiofiles.open(file_path,mode='r',encoding='utf-8') as f:
-                content = await f.read()
+    async def load_history(self,session_id:str,session_type:str):
+        #初始化：保留系统提示词
+        self.messages = [{"role": "system","content": "你是一个助理，帮助用户解决基本的问题，请不要使用特殊字符或表情符，必要的时候可以调用工具"}]
+        self.timestamps = [time.time()]
+        
+        if session_type == "main":
+            #从compact库加载最新压缩摘要（作为历史上下文）
+            async with aiosqlite.connect(COMPACT_DB_PATH) as db_compact:
                 try:
-                    messages = json.loads(content)
-                    self.messages = messages
-                except json.JSONDecodeError:
-                    logger.error(f"{session_id}.json 无法正常解码")
-                    
-    async def  save_history(self,session_id:str,messages:list):
-        filepath = os.path.join(self.history_dir, f"{session_id}.json")
-        async with aiofiles.open(filepath, mode='w', encoding='utf-8') as f:
-            await f.write(json.dumps(messages, ensure_ascii=False, indent=2))
+                    async with db_compact.execute(
+                        "SELECT message_data, end_time FROM compact_messages WHERE session_id = ? ORDER BY id DESC LIMIT 1",(session_id,)
+                    ) as cursor:
+                        row = await cursor.fetchone()
+                        if row:
+                            self.messages.append(json.loads(row[0]))
+                            self.timestamps.append(row[1])  #用结束时间作为该摘要的时间戳
+                except aiosqlite.OperationalError:
+                    pass    #表还没创建时忽略
+            
+            #加载未被压缩的内容，is_compress==0
+            async with aiosqlite.connect(MAIN_DB_PATH) as db_main:
+                try:
+                    async with db_main.execute(
+                        "SELECT message_data, created_at FROM main_messages WHERE session_id = ? AND session_type = ? AND is_compressed = 0 ORDER BY id ASC",(session_id, session_type)
+                    ) as cursor:
+                        rows = await cursor.fetchall()
+                        for row in rows:
+                            try:
+                                self.messages.append(json.loads(row[0]))
+                                self.timestamps.append(row[1])
+                            except json.JSONDecodeError:
+                                logger.error(f"Failed to decode message JSON for session {session_id}")
+                except aiosqlite.OperationalError:
+                    pass    #表还没创建时忽略
+            
+            #如果数据库中没有system消息，已在初始化时保留，无需额外处理
+            
+            self._saved_index = len(self.messages)
+            logger.info(f"加载 main 类型历史记录成功，共 {len(self.messages)} 条上下文明细。")
+        
+        elif session_type == "compact":
+            #使用压缩专用提示词，并加载main中未压缩的原始消息作为原材料
+            self.messages = [{"role":"system","content":self.COMPACT_SYSTEM_PROMPT}]
+            self.timestamps = [time.time()]
+            
+            async with aiosqlite.connect(MAIN_DB_PATH) as db_main:
+                try:
+                    async with db_main.execute(
+                        "SELECT message_data, created_at FROM main_messages WHERE session_id = ? AND session_type = 'main' AND is_compressed = 0 ORDER BY id ASC",
+                        (session_id,)
+                    ) as cursor:
+                        rows = await cursor.fetchall()
+                        if rows:
+                            #记录要压缩的数据的起始与终止时间锚点
+                            self.compact_start_time = rows[0][1]
+                            self.compact_end_time = rows[-1][1]
+                            
+                            for row in rows:
+                                try:
+                                    self.messages.append(json.loads(row[0]))
+                                    self.timestamps.append(row[1])
+                                except json.JSONDecodeError:
+                                    logger.error(f"Failed to decode message JSON for session {session_id}")
+                except aiosqlite.OperationalError:
+                    pass
+            
+            self._saved_index = len(self.messages)
+            logger.info(f"加载 compact 类型历史记录成功，共 {len(self.messages)} 条待压缩消息。")
+        else:
+            self._saved_index = len(self.messages)
 
+    async def save_history(self,session_id:str,session_type:str):
+        new_msgs = self.messages[self._saved_index:]
+        new_ts = self.timestamps[self._saved_index:]
+        
+        if not new_msgs:
+            return  #没有新消息，不需要写入
+        
+        if session_type == "main":
+            async with aiosqlite.connect(MAIN_DB_PATH) as db:
+                for msg, ts in zip(new_msgs, new_ts):
+                    formatted_time = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(ts))
+                    
+                    await db.execute(
+                        """INSERT INTO main_messages 
+                        (session_id, session_type, message_data, created_at, created_at_str, is_compressed) 
+                        VALUES (?, ?, ?, ?, ?, 0)""",
+                        (session_id, session_type, json.dumps(msg, ensure_ascii=False), ts, formatted_time)
+                    )
+                await db.commit()
+        
+        elif session_type == "compact":
+            #提取回复的总结文本（只取assistant的content）
+            summary_content = ""
+            for msg in new_msgs:
+                if msg.get("role") == "assistant" and msg.get("content"):
+                    summary_content += msg["content"]
+            if summary_content:
+                #包装为system角色,方便直接导入
+                summary_msg = {"role":"system","content":f"前情提要/压缩记忆: {summary_content}"}
+                created_at_str = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
+                #存入sqlite
+                async with aiosqlite.connect(COMPACT_DB_PATH) as db:
+                    await db.execute(
+                        "INSERT INTO compact_messages (session_id,session_type,message_data,start_time,end_time,created_at_str) VALUES (?, ?, ?, ?, ?, ?)",
+                        (session_id,"compact",json.dumps(summary_msg, ensure_ascii=False),self.compact_start_time,self.compact_end_time,created_at_str)
+                    )
+                    await db.commit()
+                #将main_messages中对应时间段的记录标记为已压缩
+                async with aiosqlite.connect(MAIN_DB_PATH) as db:
+                    await db.execute(
+                        "UPDATE main_messages SET is_compressed = 1 WHERE session_id = ? AND session_type = 'main' AND created_at >= ? AND created_at <= ?",(session_id, self.compact_start_time, self.compact_end_time)
+                    )
+                    await db.commit()
+                
+                logger.info(f"会话 {session_id} 压缩完成，已标记 {self.compact_start_time}~{self.compact_end_time} 范围内的消息为已压缩。")
+            else:
+                logger.warning(f"会话 {session_id} 的 compact 保存未提取到有效的助手总结内容。")
+        
+        self._saved_index = len(self.messages)  #更新已保存对象

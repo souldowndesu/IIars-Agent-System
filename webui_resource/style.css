@@ -28,6 +28,13 @@ body {
     padding: 15px;
 }
 
+.sidebar-actions {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    margin-bottom: 16px;
+}
+
 .primary-btn {
     background-color: #27ae60;
     color: white;
@@ -35,14 +42,37 @@ body {
     padding: 12px;
     border-radius: 6px;
     cursor: pointer;
-    font-size: 16px;
+    font-size: 14px;
     font-weight: bold;
-    margin-bottom: 20px;
     transition: background 0.3s;
+    width: 100%;
 }
 
 .primary-btn:hover {
     background-color: #2ecc71;
+}
+
+.secondary-btn {
+    background-color: #e67e22;
+    color: white;
+    border: none;
+    padding: 10px 12px;
+    border-radius: 6px;
+    cursor: pointer;
+    font-size: 13px;
+    font-weight: bold;
+    transition: background 0.3s;
+    width: 100%;
+}
+
+.secondary-btn:hover:not(:disabled) {
+    background-color: #f39c12;
+}
+
+.secondary-btn:disabled {
+    background-color: #7f8c8d;
+    cursor: not-allowed;
+    opacity: 0.6;
 }
 
 .chat-list-container {
@@ -100,6 +130,20 @@ body {
     line-height: 1.5;
     font-size: 15px;
     white-space: pre-wrap;
+}
+
+/* 时间戳样式 */
+.msg-time {
+    font-size: 11px;
+    color: #6c757d;
+    margin-bottom: 6px;
+    -webkit-user-select: none;
+    user-select: none;
+    font-style: italic;
+}
+
+.message-bubble.user .msg-time {
+    color: rgba(255, 255, 255, 0.7);
 }
 
 .message-bubble.user {
@@ -233,4 +277,85 @@ body {
 /* 输入参数块：比输出块稍浅以示区分 */
 .tool-output.tool-input {
     background-color: #2d2d2d;
+}
+
+/* ===== 压缩按钮 ===== */
+.chat-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+}
+.compact-trigger-btn {
+    background-color: #8e44ad;
+    color: white;
+    border: none;
+    padding: 8px 18px;
+    border-radius: 6px;
+    cursor: pointer;
+    font-size: 14px;
+    font-weight: bold;
+    transition: background 0.3s;
+    white-space: nowrap;
+}
+.compact-trigger-btn:hover:not(:disabled) {
+    background-color: #a569bd;
+}
+.compact-trigger-btn:disabled {
+    background-color: #7f8c8d;
+    cursor: not-allowed;
+    opacity: 0.6;
+}
+
+/* ===== 压缩面板 ===== */
+.compact-panel {
+    display: none;
+    background-color: #fdf2f8;
+    border-bottom: 3px solid #8e44ad;
+    padding: 0;
+    max-height: 0;
+    overflow: hidden;
+    transition: max-height 0.4s ease, padding 0.4s ease;
+}
+.compact-panel.open {
+    display: block;
+    max-height: 500px;
+    padding: 12px 20px;
+    overflow-y: auto;
+}
+.compact-panel-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 10px;
+    font-weight: 600;
+    color: #6c3483;
+}
+.compact-status {
+    font-size: 13px;
+    color: #e67e22;
+    font-weight: 600;
+}
+.compact-status.done {
+    color: #27ae60;
+}
+.compact-status.error {
+    color: #e74c3c;
+}
+.compact-content {
+    font-size: 14px;
+    line-height: 1.7;
+    color: #333;
+    white-space: pre-wrap;
+    word-break: break-word;
+    background: #fff;
+    border: 1px solid #e8daef;
+    border-radius: 8px;
+    padding: 14px;
+    min-height: 40px;
+}
+.compact-content:empty::after {
+    content: "压缩中，等待 AI 生成总结...";
+    color: #999;
+    font-style: italic;
 }
