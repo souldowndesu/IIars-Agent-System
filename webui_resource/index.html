@@ -37,8 +37,13 @@
                 </div>
 
             <div class="input-area">
-                <input type="text" id="message-input" placeholder="输入你的问题..." disabled>
-                <button id="send-btn" disabled>发送</button>
+                <div class="input-area-container">
+                    <div class="input-row">
+                        <input type="text" id="message-input" placeholder="输入你的问题..." disabled autocomplete="off" data-lpignore="true">
+                        <button id="send-btn" disabled>发送</button>
+                    </div>
+                    <div id="follow-up-hint" class="follow-up-hint"></div>
+                </div>
             </div>
         </main>
     </div>

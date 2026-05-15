@@ -19,6 +19,9 @@ let currentEventSource = null;
 let activeAssistantMessageBubble = null;
 let activeToolBubbles = {};
 
+// 用户手动上翻标记（用于阻止自动滚动）
+let userManuallyScrolledUp = false;
+
 // 压缩状态
 let isCompacting = false;
 let compactEventSource = null;
@@ -30,6 +33,38 @@ let localSessionsData = JSON.parse(localStorage.getItem('chatSessions')) || {};
 // 已隐藏的临时会话 ID 集合（数据不删除，仅从侧边栏隐藏）
 let hiddenTempIds = new Set(JSON.parse(localStorage.getItem('hiddenTempIds')) || []);
 
+// 清理 localStorage 中无效/旧格式的会话条目（只保留 main_* 和 temp-N 格式）
+function sanitizeLocalStorage() {
+    const validKeys = {};
+    let maxTempNum = 0;
+    Object.keys(localSessionsData).forEach(key => {
+        if (key.startsWith('main_')) {
+            // 只保留第一个 main_ 会话
+            if (!Object.keys(validKeys).some(k => k.startsWith('main_'))) {
+                validKeys[key] = localSessionsData[key];
+            }
+        } else if (/^temp-\d+$/.test(key)) {
+            // 保留有效 temp-N 格式
+            validKeys[key] = localSessionsData[key];
+            const num = parseInt(key.replace('temp-', ''), 10);
+            if (num > maxTempNum) maxTempNum = num;
+        }
+        // 丢弃所有其他格式（compact_、chat_、temp_xxx 旧格式等）
+    });
+    if (maxTempNum > 0) {
+        localStorage.setItem('tempCounter', String(maxTempNum));
+    }
+    localSessionsData = validKeys;
+    saveLocalData();
+    // 清理隐藏列表中的无效条目
+    const validHiddenSet = new Set();
+    hiddenTempIds.forEach(id => {
+        if (/^temp-\d+$/.test(id)) validHiddenSet.add(id);
+    });
+    hiddenTempIds = validHiddenSet;
+    localStorage.setItem('hiddenTempIds', JSON.stringify([...hiddenTempIds]));
+}
+
 // 格式化时间戳为本地可读时间
 function formatTime(iso) {
     if (!iso) return '';
@@ -38,14 +73,29 @@ function formatTime(iso) {
     return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
 }
 
-// 生成带前缀的 session_id
+// 生成带前缀的 session_id（temp 使用递增编号 temp-1, temp-2 ...）
 function generateSessionId(type) {
+    if (type === 'temp') {
+        const nextNum = (parseInt(localStorage.getItem('tempCounter')) || 0) + 1;
+        localStorage.setItem('tempCounter', nextNum);
+        return `temp-${nextNum}`;
+    }
+    // compact 仍用随机后缀（不在侧边栏显示，无影响）
+    if (type === 'compact') {
+        const chars = '0123456789abcdefghijklmnopqrstuvwxyz';
+        let shortId = '';
+        for (let i = 0; i < 6; i++) {
+            shortId += chars[Math.floor(Math.random() * chars.length)];
+        }
+        return `compact_${shortId}`;
+    }
+    // main 保持原有随机逻辑
     const chars = '0123456789abcdefghijklmnopqrstuvwxyz';
     let shortId = '';
     for (let i = 0; i < 6; i++) {
         shortId += chars[Math.floor(Math.random() * chars.length)];
     }
-    return `${type}_${shortId}`;
+    return `main_${shortId}`;
 }
 
 // 获取 main 会话 ID（始终用固定的 main_ 前缀，若不存在则创建）
@@ -58,15 +108,35 @@ function getMainSessionId() {
     return newMainId;
 }
 
+// 从 sessionId 解析出 session_type（兼容 temp-N 新格式和 main_xxx / compact_xxx 旧格式）
+function getSessionType(sessionId) {
+    if (sessionId.startsWith('temp-')) return 'temp';
+    if (sessionId.includes('_')) return sessionId.split('_')[0];
+    return 'chat';
+}
+
 // 初始化
 function init() {
+    // 清理旧格式数据，确保只有 main_* 和 temp-N 格式的会话
+    sanitizeLocalStorage();
+
     // 确保 main 会话存在并默认加载
     const mainId = getMainSessionId();
     switchSession(mainId);
 
+    // 禁用浏览器自动清除/自动补全按钮，防止hover触发异常
+    if (messageInput) {
+        messageInput.setAttribute('autocomplete', 'off');
+        messageInput.setAttribute('spellcheck', 'false');
+    }
+
     newChatBtn.addEventListener('click', createTempChat);
     if (cleanTempBtn) {
         cleanTempBtn.addEventListener('click', cleanTempChats);
+        // 防止hover时触发任何意外数据变更
+        cleanTempBtn.addEventListener('mouseenter', function(e) {
+            e.stopPropagation();
+        });
     }
     sendBtn.addEventListener('click', sendMessage);
     messageInput.addEventListener('keypress', (e) => {
@@ -86,9 +156,11 @@ function renderChatList() {
     const otherSessions = [];
 
     Object.keys(localSessionsData).forEach(id => {
-        if (id.startsWith('main_')) {
+        // 跳过 compact_ 内部会话（不在侧边栏显示）
+        if (id.startsWith('compact_')) return;
+        if (id.startsWith('main_') || id === 'main') {
             mainSessions.push(id);
-        } else if (id.startsWith('temp_')) {
+        } else if (id.startsWith('temp-') || id.startsWith('temp_')) {
             tempSessions.push(id);
         } else {
             otherSessions.push(id);
@@ -110,7 +182,8 @@ function renderChatList() {
     visibleTempIds.sort(sortByFirstTime);
     otherSessions.sort(sortByFirstTime);
 
-    const ordered = [...mainSessions, ...visibleTempIds, ...otherSessions];
+    // 只显示 main 和 temp 会话，过滤掉旧版 chat_* 等杂项
+    const ordered = [...mainSessions, ...visibleTempIds];
     const totalVisibleTemp = visibleTempIds.length;
 
     // 更新清理按钮状态
@@ -119,20 +192,26 @@ function renderChatList() {
     }
 
     ordered.forEach(id => {
+        // 跳过 compact_ 内部会话（不在侧边栏显示）
+        if (id.startsWith('compact_')) return;
+
         const li = document.createElement('li');
         li.classList.add('chat-item');
 
         // 根据前缀加不同图标
-        let icon = '💬';
-        if (id.startsWith('main_')) icon = '⭐';
-        else if (id.startsWith('temp_')) icon = '🕐';
+        let icon = '\uD83D\uDCAC'; // 💬
+        if (id.startsWith('main_') || id === 'main') icon = '\u2B50'; // ⭐
+        else if (id.startsWith('temp-') || id.startsWith('temp_')) icon = '\uD83D\uDD50'; // 🕐
 
-        // 显示名称：前缀 + 短ID 后4位 + 消息数
-        const parts = id.split('_');
-        const typeLabel = parts[0];
-        const shortSuffix = parts.length > 1 ? parts.slice(1).join('_').slice(-4) : id.slice(-4);
-        const msgCount = (localSessionsData[id] || []).length;
-        li.textContent = `${icon} ${typeLabel}_${shortSuffix} (${msgCount})`;
+        // 显示名称：temp-N 直接显示；main_xxx 显示 main-xxx后6位
+        let displayLabel = id;
+        if (id.startsWith('temp-')) {
+            displayLabel = id;
+        } else if (id.includes('_')) {
+            const parts = id.split('_');
+            displayLabel = parts[0] + '-' + parts.slice(1).join('_').slice(-6);
+        }
+        li.textContent = `${icon} ${displayLabel}`;
 
         if (id === currentSessionId) li.classList.add('active');
         li.addEventListener('click', () => switchSession(id));
@@ -152,12 +231,12 @@ function createTempChat() {
 // 清理临时对话（仅隐藏，不删除 localStorage 记录）
 function cleanTempChats() {
     const visibleTempIds = Object.keys(localSessionsData).filter(
-        id => id.startsWith('temp_') && !hiddenTempIds.has(id)
+        id => (id.startsWith('temp-') || id.startsWith('temp_')) && !hiddenTempIds.has(id)
     );
     if (visibleTempIds.length === 0) return;
 
     // 如果当前在 temp 会话，先切到 main
-    if (currentSessionId && currentSessionId.startsWith('temp_')) {
+    if (currentSessionId && (currentSessionId.startsWith('temp-') || currentSessionId.startsWith('temp_'))) {
         const mainId = getMainSessionId();
         switchSession(mainId);
     }
@@ -183,15 +262,24 @@ async function switchSession(sessionId) {
     currentSessionId = sessionId;
 
     // 更新标题
-    const parts = sessionId.split('_');
-    const typeLabel = parts.length > 1 ? parts[0] : 'unknown';
-    const shortSuffix = parts.length > 1 ? parts.slice(1).join('_').slice(-6) : sessionId.slice(-6);
-    currentSessionTitle.textContent = `[${typeLabel}] ${shortSuffix}`;
+    let titleText = sessionId;
+    if (sessionId.startsWith('temp-')) {
+        titleText = `[temp] ${sessionId.replace('temp-', '')}`;
+    } else if (sessionId.includes('_')) {
+        const parts = sessionId.split('_');
+        titleText = `[${parts[0]}] ${parts.slice(1).join('_').slice(-6)}`;
+    } else {
+        titleText = `[chat] ${sessionId.slice(-6)}`;
+    }
+    currentSessionTitle.textContent = titleText;
+
+    // 隐藏提示
+    hideFollowUpHint();
 
     // 从服务端同步最新历史，覆盖 localStorage 缓存
     messagesContainer.innerHTML = '';
     try {
-        const sessionType = parts.length > 1 ? parts[0] : 'chat';
+        const sessionType = getSessionType(sessionId);
         const resp = await fetch(
             `${BASE_URL}/get-history?session_id=${encodeURIComponent(sessionId)}&session_type=${encodeURIComponent(sessionType)}`
         );
@@ -217,7 +305,7 @@ async function switchSession(sessionId) {
 
     renderChatList();
     connectSSE(sessionId);
-    
+
     // 更新压缩按钮状态
     updateCompactButton();
 }
@@ -225,7 +313,7 @@ async function switchSession(sessionId) {
 // 更新压缩按钮可见性和状态
 function updateCompactButton() {
     if (!compactBtn) return;
-    if (currentSessionId && currentSessionId.startsWith('main_')) {
+    if (currentSessionId && (currentSessionId.startsWith('main_') || currentSessionId === 'main')) {
         compactBtn.style.display = '';
         compactBtn.disabled = isCompacting;
     } else {
@@ -237,16 +325,15 @@ function updateCompactButton() {
 
 async function startCompact() {
     if (isCompacting) return;
-    if (!currentSessionId || !currentSessionId.startsWith('main_')) return;
-    if (isCompacting) return;
+    if (!currentSessionId || (!currentSessionId.startsWith('main_') && currentSessionId !== 'main')) return;
 
     isCompacting = true;
     updateCompactButton();
-    
+
     // 显示面板
     compactPanel.classList.add('open');
     compactContent.textContent = '';
-    compactStatus.textContent = '步骤 1/4: 保存主会话...';
+    compactStatus.textContent = '\u6B65\u9AA4 1/4: \u4FDD\u5B58\u4E3B\u4F1A\u8BDD...';
     compactStatus.className = 'compact-status';
 
     try {
@@ -260,17 +347,17 @@ async function startCompact() {
 
         // 步骤 2: 发送压缩指令到 compact 会话
         compactSessionId = generateSessionId('compact');
-        compactStatus.textContent = '步骤 2/4: 启动压缩会话...';
+        compactStatus.textContent = '\u6B65\u9AA4 2/4: \u542F\u52A8\u538B\u7F29\u4F1A\u8BDD...';
         console.log(`[Compact] 步骤 2: 启动 compact 会话 ${compactSessionId}`);
 
         const inputRes = await fetch(
-            `${BASE_URL}/str-input?session_id=${encodeURIComponent(compactSessionId)}&session_type=compact&user_input=${encodeURIComponent('请对上面的所有对话进行提炼和压缩。')}`,
+            `${BASE_URL}/str-input?session_id=${encodeURIComponent(compactSessionId)}&session_type=compact&user_input=${encodeURIComponent('\u8BF7\u5BF9\u4E0A\u9762\u7684\u6240\u6709\u5BF9\u8BDD\u8FDB\u884C\u63D0\u70BC\u548C\u538B\u7F29\u3002')}`,
             { method: 'POST' }
         );
         console.log('[Compact] str-input 完成:', await inputRes.json());
 
         // 步骤 3: 建立 compact SSE，接收压缩结果
-        compactStatus.textContent = '步骤 3/4: AI 正在生成压缩总结...';
+        compactStatus.textContent = '\u6B65\u9AA4 3/4: AI \u6B63\u5728\u751F\u6210\u538B\u7F29\u603B\u7ED3...';
         console.log(`[Compact] 步骤 3: 连接 compact SSE`);
 
         compactEventSource = new EventSource(
@@ -288,7 +375,7 @@ async function startCompact() {
 
     } catch (err) {
         console.error('[Compact] 压缩流程异常:', err);
-        compactStatus.textContent = '❌ 压缩失败';
+        compactStatus.textContent = '\u274C \u538B\u7F29\u5931\u8D25';
         compactStatus.className = 'compact-status error';
         finishCompact();
     }
@@ -296,37 +383,37 @@ async function startCompact() {
 
 function handleCompactEvent(payload) {
     const eventType = payload.event;
-    
+
     switch (eventType) {
         case 'start':
             console.log('[Compact] 开始接收压缩内容');
             compactContent.textContent = '';
             break;
-        
+
         case 'content':
             if (payload.data) {
                 compactContent.textContent += payload.data;
                 compactPanel.scrollTop = compactPanel.scrollHeight;
             }
             break;
-        
+
         case 'end':
             console.log('[Compact] 压缩结束，触发步骤 4: refresh main');
-            compactStatus.textContent = '步骤 4/4: 刷新主会话...';
-            
+            compactStatus.textContent = '\u6B65\u9AA4 4/4: \u5237\u65B0\u4E3B\u4F1A\u8BDD...';
+
             // 自动触发 refresh（步骤 4）
             if (compactEventSource) {
                 compactEventSource.close();
                 compactEventSource = null;
             }
-            
+
             // 异步执行 refresh + 完成清理
             finishCompactWithRefresh();
             break;
-        
+
         case 'error':
             console.error('[Compact] 服务端错误:', payload.error_msg);
-            compactStatus.textContent = `❌ ${payload.error_msg}`;
+            compactStatus.textContent = `\u274C ${payload.error_msg}`;
             compactStatus.className = 'compact-status error';
             if (compactEventSource) {
                 compactEventSource.close();
@@ -346,20 +433,20 @@ async function finishCompactWithRefresh() {
         );
         const refreshData = await refreshRes.json();
         console.log('[Compact] refresh 完成:', refreshData);
-        
-        compactStatus.textContent = '✅ 压缩完成！主会话已更新';
+
+        compactStatus.textContent = '\u2705 \u538B\u7F29\u5B8C\u6210\uFF01\u4E3B\u4F1A\u8BDD\u5DF2\u66F4\u65B0';
         compactStatus.className = 'compact-status done';
     } catch (err) {
         console.error('[Compact] refresh 异常:', err);
-        compactStatus.textContent = '⚠️ 总结已生成，但主会话刷新失败';
+        compactStatus.textContent = '\u26A0\uFE0F \u603B\u7ED3\u5DF2\u751F\u6210\uFF0C\u4F46\u4E3B\u4F1A\u8BDD\u5237\u65B0\u5931\u8D25';
         compactStatus.className = 'compact-status error';
     }
-    
+
     // 延迟后收起面板
     setTimeout(() => {
         compactPanel.classList.remove('open');
     }, 3000);
-    
+
     finishCompact();
 }
 
@@ -377,8 +464,7 @@ function finishCompact() {
 function connectSSE(sessionId) {
     console.log(`[Frontend] 尝试连接到会话: ${sessionId}`);
 
-    const sessionParts = sessionId.split('_');
-    const sessionType = sessionParts.length > 1 ? sessionParts[0] : 'chat';
+    const sessionType = getSessionType(sessionId);
 
     currentEventSource = new EventSource(
         `${BASE_URL}/stream?session_id=${encodeURIComponent(sessionId)}&session_type=${encodeURIComponent(sessionType)}`
@@ -398,6 +484,8 @@ function connectSSE(sessionId) {
 function handleServerEvent(payload) {
     switch (payload.event) {
         case 'start':
+            hideFollowUpHint();
+            userManuallyScrolledUp = false;  // 新一轮对话，重置滚动标记
             activeAssistantMessageBubble = appendMessageBubble('assistant', '');
             break;
 
@@ -410,12 +498,12 @@ function handleServerEvent(payload) {
 
         case 'tool_status':
             if (payload.status === 'start') {
-                const toolBubble = appendMessageBubble('tool', `⚙️ 正在调用工具: ${payload.name} ...`);
+                const toolBubble = appendMessageBubble('tool', `\u2699\uFE0F \u6B63\u5728\u8C03\u7528\u5DE5\u5177: ${payload.name} ...`);
                 activeToolBubbles[payload.name] = toolBubble;
             } else if (payload.status === 'result') {
                 const toolBubble = activeToolBubbles[payload.name];
                 if (toolBubble) {
-                    const statusIcon = payload.executed_well ? '✅' : '❌';
+                    const statusIcon = payload.executed_well ? '\u2705' : '\u274C';
 
                     const escHtml = (s) => String(s)
                         .replace(/&/g, "&" + "amp;")
@@ -423,14 +511,14 @@ function handleServerEvent(payload) {
                         .replace(/>/g, "&" + "gt;");
 
                     const escArgs = escHtml(payload.tool_args || "{}");
-                    const escOutput = escHtml(payload.result_data || "无返回结果");
+                    const escOutput = escHtml(payload.result_data || "\u65E0\u8FD4\u56DE\u7ED3\u679C");
 
                     const htmlContent = [
                         '<details open>',
-                        '<summary>⚙️ 工具 [', escHtml(payload.name), '] 执行完毕 ', statusIcon, '</summary>',
-                        '<div class="tool-section-label">📥 输入参数</div>',
+                        '<summary>\u2699\uFE0F \u5DE5\u5177 [', escHtml(payload.name), '] \u6267\u884C\u5B8C\u6BD5 ', statusIcon, '</summary>',
+                        '<div class="tool-section-label">\uD83D\uDCE5 \u8F93\u5165\u53C2\u6570</div>',
                         '<pre class="tool-output tool-input">', escArgs, '</pre>',
-                        '<div class="tool-section-label">📤 输出结果</div>',
+                        '<div class="tool-section-label">\uD83D\uDCE4 \u8F93\u51FA\u7ED3\u679C</div>',
                         '<pre class="tool-output">', escOutput, '</pre>',
                         '</details>'
                     ].join('');
@@ -449,12 +537,14 @@ function handleServerEvent(payload) {
             }
             activeAssistantMessageBubble = null;
             sendBtn.disabled = false;
+            showFollowUpHint();
             break;
 
         case 'error':
-            appendMessageBubble('assistant', `[系统错误]: ${payload.error_msg}`);
+            appendMessageBubble('assistant', `[\u7CFB\u7EDF\u9519\u8BEF]: ${payload.error_msg}`);
             activeAssistantMessageBubble = null;
             sendBtn.disabled = false;
+            showFollowUpHint();
             break;
     }
 }
@@ -464,14 +554,14 @@ async function sendMessage() {
     const text = messageInput.value.trim();
     if (!text || !currentSessionId) return;
 
+    hideFollowUpHint();
     appendMessageBubble('user', text);
     saveMessageToLocal(currentSessionId, 'user', text);
     messageInput.value = '';
     sendBtn.disabled = true;
 
     try {
-        const sessionParts = currentSessionId.split('_');
-        const sessionType = sessionParts.length > 1 ? sessionParts[0] : 'chat';
+        const sessionType = getSessionType(currentSessionId);
 
         const response = await fetch(
             `${BASE_URL}/str-input?session_id=${encodeURIComponent(currentSessionId)}&session_type=${encodeURIComponent(sessionType)}&user_input=${encodeURIComponent(text)}`,
@@ -479,11 +569,11 @@ async function sendMessage() {
         );
         const result = await response.json();
         if (result.status !== 'started') {
-            throw new Error("启动对话任务失败");
+            throw new Error("\u542F\u52A8\u5BF9\u8BDD\u4EFB\u52A1\u5931\u8D25");
         }
     } catch (error) {
         console.error("[Frontend] 消息发送异常:", error);
-        appendMessageBubble('assistant', `[网络错误]: 无法连接到生成节点。`);
+        appendMessageBubble('assistant', `[\u7F51\u7EDC\u9519\u8BEF]: \u65E0\u6CD5\u8FDE\u63A5\u5230\u751F\u6210\u8282\u70B9\u3002`);
         sendBtn.disabled = false;
     }
 }
@@ -517,10 +607,51 @@ function appendMessageBubble(role, content, isHtml = false, savedTime = null) {
     return wrapper;
 }
 
-// 滚动到底部
+// 智能滚动到底部：仅当用户在底部附近且未手动上翻时才自动滚动
 function scrollToBottom() {
-    messagesContainer.scrollTop = messagesContainer.scrollHeight;
+    const threshold = 80; // 距离底部80px以内视为"在底部"
+    const isNearBottom = messagesContainer.scrollHeight - messagesContainer.scrollTop - messagesContainer.clientHeight < threshold;
+    // 只有用户在底部附近且没有手动上翻时才自动滚动
+    if (isNearBottom && !userManuallyScrolledUp) {
+        messagesContainer.scrollTop = messagesContainer.scrollHeight;
+    }
 }
+
+// 监听用户手动滚动行为（支持鼠标滚轮、触摸板、滚动条拖动、键盘翻页等所有滚动方式）
+// 1) wheel 事件：精准判断方向
+messagesContainer.addEventListener('wheel', function(e) {
+    if (e.deltaY < 0) {
+        userManuallyScrolledUp = true;
+    } else if (e.deltaY > 0) {
+        const threshold = 10;
+        const isAtBottom = messagesContainer.scrollHeight - messagesContainer.scrollTop - messagesContainer.clientHeight < threshold;
+        if (isAtBottom) {
+            userManuallyScrolledUp = false;
+        }
+    }
+});
+
+// 2) scroll 事件：捕获滚动条拖动、键盘翻页等，判断是否在底部
+messagesContainer.addEventListener('scroll', function() {
+    const threshold = 10;
+    const isAtBottom = messagesContainer.scrollHeight - messagesContainer.scrollTop - messagesContainer.clientHeight < threshold;
+    if (!isAtBottom) {
+        userManuallyScrolledUp = true;
+    } else {
+        userManuallyScrolledUp = false;
+    }
+});
+
+// 3) 触摸/拖动滚动（移动端支持）
+messagesContainer.addEventListener('touchmove', function() {
+    const threshold = 10;
+    const isAtBottom = messagesContainer.scrollHeight - messagesContainer.scrollTop - messagesContainer.clientHeight < threshold;
+    if (!isAtBottom) {
+        userManuallyScrolledUp = true;
+    } else {
+        userManuallyScrolledUp = false;
+    }
+});
 
 // 持久化消息（带时间戳）
 function saveMessageToLocal(sessionId, role, content, isHtml = false) {
@@ -557,6 +688,24 @@ function saveAssistantToLocal(sessionId, content) {
 
 function saveLocalData() {
     localStorage.setItem('chatSessions', JSON.stringify(localSessionsData));
+}
+
+// 显示连续对话提示（执行完成后在输入框下方显示）
+function showFollowUpHint() {
+    const hintEl = document.getElementById('follow-up-hint');
+    if (hintEl) {
+        hintEl.textContent = '\uD83D\uDCA1 \u4F60\u53EF\u4EE5\u7EE7\u7EED\u8FFD\u95EE\uFF0C\u6216\u8F93\u5165\u65B0\u95EE\u9898...';
+        hintEl.style.opacity = '1';
+    }
+}
+
+// 隐藏连续对话提示（用户开始新输入时）
+function hideFollowUpHint() {
+    const hintEl = document.getElementById('follow-up-hint');
+    if (hintEl) {
+        hintEl.style.opacity = '0';
+        setTimeout(() => { hintEl.textContent = ''; }, 300);
+    }
 }
 
 // 启动

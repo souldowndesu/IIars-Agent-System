@@ -21,6 +21,8 @@ body {
 /* 侧边栏样式 */
 .sidebar {
     width: 260px;
+    min-width: 260px;
+    max-width: 260px;
     background-color: #2c3e50;
     color: #fff;
     display: flex;
@@ -33,6 +35,7 @@ body {
     flex-direction: column;
     gap: 8px;
     margin-bottom: 16px;
+    flex-shrink: 0;
 }
 
 .primary-btn {
@@ -105,6 +108,7 @@ body {
     display: flex;
     flex-direction: column;
     background-color: #fff;
+    overflow: hidden;
 }
 
 .chat-header {
@@ -160,61 +164,122 @@ body {
     border-bottom-left-radius: 0;
 }
 
-/* 输入区样式 */
+/* 输入区样式 —— 融入对话框风格 */
 .input-area {
-    padding: 20px;
-    border-top: 1px solid #e0e0e0;
+    padding: 0 20px 16px 20px;
+    border-top: none;
+    display: flex;
+    justify-content: center;
+    background-color: transparent;
+}
+
+.input-area-container {
+    width: 100%;
+    max-width: 800px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+/* 连续对话提示区：在执行完成后显示在输入框上方 */
+.follow-up-hint {
+    font-size: 13px;
+    color: #6c757d;
+    text-align: center;
+    min-height: 0;
+    padding: 0;
+    line-height: 1.6;
+    opacity: 0;
+    transition: opacity 0.3s ease;
+}
+
+.input-row {
     display: flex;
     gap: 10px;
-    background-color: #fafafa;
+    align-items: center;
+    background-color: #fff;
+    border: 2px solid #e0e0e0;
+    border-radius: 16px;
+    padding: 6px 6px 6px 16px;
+    box-shadow: 0 2px 12px rgba(0, 0, 0, 0.06);
+    transition: border-color 0.25s ease, box-shadow 0.25s ease;
+}
+
+.input-row:focus-within {
+    border-color: #007bff;
+    box-shadow: 0 4px 20px rgba(0, 123, 255, 0.15);
 }
 
 #message-input {
     flex: 1;
-    padding: 12px;
-    border: 1px solid #ccc;
-    border-radius: 6px;
+    padding: 12px 0;
+    border: none;
+    border-radius: 0;
     font-size: 16px;
     outline: none;
+    background: transparent;
+    color: #333;
+}
+
+#message-input::placeholder {
+    color: #adb5bd;
 }
 
 #message-input:disabled {
-    background-color: #eaeaea;
+    color: #999;
     cursor: not-allowed;
+}
+
+/* 隐藏浏览器原生清除按钮，避免触发意外行为 */
+#message-input::-webkit-search-cancel-button,
+#message-input::-webkit-search-decoration,
+#message-input::-webkit-clear-button,
+#message-input::-ms-clear {
+    display: none;
+    -webkit-appearance: none;
 }
 
 #send-btn {
-    padding: 0 25px;
+    padding: 10px 22px;
     background-color: #007bff;
     color: white;
     border: none;
-    border-radius: 6px;
-    font-size: 16px;
+    border-radius: 12px;
+    font-size: 15px;
+    font-weight: 600;
     cursor: pointer;
-    transition: background 0.3s;
+    transition: background 0.2s, transform 0.15s;
+    white-space: nowrap;
+    flex-shrink: 0;
 }
 
 #send-btn:disabled {
-    background-color: #a0c4ff;
+    background-color: #b0c4de;
     cursor: not-allowed;
+    transform: none;
 }
 
 #send-btn:hover:not(:disabled) {
     background-color: #0056b3;
+    transform: scale(1.03);
 }
 
-/* 工具调用气泡专属样式 */
+#send-btn:active:not(:disabled) {
+    transform: scale(0.97);
+}
+
+/* 工具调用气泡 —— 内嵌于对话流，紧凑卡片风格 */
 .message-bubble.tool {
-    align-self: center;
-    background-color: #f8f9fa;
-    color: #495057;
-    font-size: 14px;
-    padding: 10px 16px;
-    border: 1px solid #ced4da;
-    border-radius: 12px;
-    max-width: 85%;
-    margin: 8px 0;
-    box-shadow: 0 2px 4px rgba(0,0,0,0.05);
+    align-self: flex-start;
+    background-color: #f0f4ff;
+    color: #333;
+    font-size: 13px;
+    padding: 8px 14px;
+    border-left: 4px solid #6c5ce7;
+    border-radius: 0 8px 8px 0;
+    max-width: 88%;
+    margin: 4px 0 4px 16px;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.06);
     white-space: normal;
 }
 
@@ -224,59 +289,65 @@ body {
     outline: none;
 }
 
-/* 标题栏（执行完毕 ✅ 等字样） */
+/* 标题栏 */
 .message-bubble.tool summary {
     font-weight: 600;
     outline: none;
     -webkit-user-select: none;
     user-select: none;
-    list-style: none; /* 隐藏默认三角符号 */
+    list-style: none;
     display: flex;
     align-items: center;
-    gap: 8px;
+    gap: 6px;
+    color: #4a3f9a;
+    font-size: 13px;
 }
 
 /* 自定义展开箭头 */
 .message-bubble.tool summary::before {
     content: "▶";
-    font-size: 12px;
+    font-size: 10px;
     transition: transform 0.2s;
+    color: #6c5ce7;
+    flex-shrink: 0;
 }
 .message-bubble.tool details[open] summary::before {
     transform: rotate(90deg);
 }
 
-/* 区域标签 */
+/* 区域标签（更小更淡） */
 .tool-section-label {
-    font-size: 12px;
+    font-size: 11px;
     font-weight: 600;
-    color: #6c757d;
-    margin-top: 10px;
-    margin-bottom: 4px;
+    color: #888;
+    margin-top: 8px;
+    margin-bottom: 3px;
     text-transform: uppercase;
-    letter-spacing: 0.5px;
+    letter-spacing: 0.3px;
 }
 
 /* 仿终端代码输出块 */
 .tool-output {
-    margin: 6px 0 0 0;
-    padding: 12px;
-    background-color: #1e1e1e; /* 经典代码黑 */
-    color: #d4d4d4;            /* 代码灰白 */
-    border-radius: 8px;
+    margin: 4px 0 0 0;
+    padding: 10px 12px;
+    background-color: #1e2630;
+    color: #c8d6e5;
+    border-radius: 6px;
     font-family: 'Consolas', 'Courier New', monospace;
-    font-size: 13px;
-    white-space: pre-wrap;     /* 允许长文本换行 */
+    font-size: 12px;
+    white-space: pre-wrap;
     word-break: break-word;
-    max-height: 400px;         /* 限制最大高度，防止霸屏 */
-    overflow-y: auto;          /* 内容过多时内部滚动 */
+    max-height: 300px;
+    overflow-y: auto;
     text-align: left;
-    cursor: text;              /* 允许光标选中复制内容 */
+    cursor: text;
+    line-height: 1.45;
 }
 
-/* 输入参数块：比输出块稍浅以示区分 */
+/* 输入参数块：比输出块稍浅 */
 .tool-output.tool-input {
-    background-color: #2d2d2d;
+    background-color: #252f3d;
+    border-left: 2px solid #576574;
 }
 
 /* ===== 压缩按钮 ===== */
