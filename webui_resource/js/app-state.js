@@ -63,12 +63,13 @@ function generateSessionId(type) {
 }
 
 function getMainSessionId() {
-    const mainKey = Object.keys(localSessionsData).find(k => k.startsWith('main_'));
-    if (mainKey) return mainKey;
-    const newMainId = generateSessionId('main');
-    localSessionsData[newMainId] = [];
-    saveLocalData();
-    return newMainId;
+    const fixedMainId = 'main'; 
+    
+    if (!localSessionsData[fixedMainId]) {
+        localSessionsData[fixedMainId] = [];
+        saveLocalData();
+    }
+    return fixedMainId;
 }
 
 function getSessionType(sessionId) {

@@ -6,7 +6,7 @@
 document.addEventListener('DOMContentLoaded', function () {
     // ========== 步骤 1：获取所有 DOM 引用 ==========
     const domRefs = {
-        messagesContainer:    document.getElementById('chat-messages'),
+        messagesContainer:    document.getElementById('messages-container'),
         chatListUl:           document.getElementById('chat-list'),
         currentSessionTitle:  document.getElementById('current-session-title'),
         messageInput:         document.getElementById('message-input'),

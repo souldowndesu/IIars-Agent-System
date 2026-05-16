@@ -146,6 +146,7 @@ class ChatApp: #转发端口
                 key = f"{session_id}:{session_type}"
                 if key in self.session_manager.active_sessions:
                     active_llm = self.session_manager.active_sessions[key]["llm"]
+                    await active_llm.save_history(session_id, session_type)
                     await active_llm.load_history(session_id, session_type)
                 return {"status":"refreshed"}
             
@@ -179,7 +180,6 @@ class ChatApp: #转发端口
                         })
                     logger.info(f"get-history 从内存返回 {len(messages)} 条消息 (session={session_id})")
                     return {"status": "ok", "session_id": session_id, "messages": messages}
-
                 # 降级：从SQLite 读取
                 async with aiosqlite.connect(MAIN_DB_PATH) as db:
                     await db.execute("PRAGMA journal_mode=WAL")
@@ -314,6 +314,7 @@ class ChatApp: #转发端口
             await self.broadcaster.broadcast(session_id,{
                 "event":"end",
             })
+            await llm.save_history(session_id, session_type)    #每一次对话后都同步对话
         except Exception as e:
             logger.exception(f"llm_worker 发生异常: {e}")
             await self.broadcaster.broadcast(session_id,{

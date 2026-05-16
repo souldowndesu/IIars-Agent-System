@@ -213,7 +213,7 @@ class AsyncLLM:
                             self.messages.append(json.loads(row[0]))
                             self.timestamps.append(row[1])  #用结束时间作为该摘要的时间戳
                 except aiosqlite.OperationalError:
-                    pass    #表还没创建时忽略
+                    logger.warning("列表未创建或无法加载")    #表还没创建时忽略
             
             #加载未被压缩的内容，is_compress==0
             async with aiosqlite.connect(MAIN_DB_PATH) as db_main:
@@ -229,7 +229,7 @@ class AsyncLLM:
                             except json.JSONDecodeError:
                                 logger.error(f"Failed to decode message JSON for session {session_id}")
                 except aiosqlite.OperationalError:
-                    pass    #表还没创建时忽略
+                    logger.warning("列表未创建或无法加载")    #表还没创建时忽略
             
             #如果数据库中没有system消息，已在初始化时保留，无需额外处理
             
@@ -279,7 +279,7 @@ class AsyncLLM:
                                 except json.JSONDecodeError:
                                     logger.error(f"Failed to decode message JSON for session {session_id}")
                 except aiosqlite.OperationalError:
-                    pass
+                    logger.warning("列表未创建或无法加载")
             
             self._saved_index = len(self.messages)
             logger.info(f"加载 compact 类型历史记录成功，共 {len(self.messages)} 条待压缩消息。")

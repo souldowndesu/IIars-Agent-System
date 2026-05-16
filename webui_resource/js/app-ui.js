@@ -60,36 +60,75 @@ function appendMessageBubble(role, content, isHtml = false, savedTime = null) {
     return wrapper;
 }
 
+
 // ---- 历史消息重新渲染 ----
 function reRenderMessages(sessionId) {
     const history = localSessionsData[sessionId] || [];
-    const currentBubbleCount = messagesContainer.querySelectorAll('.message-bubble').length;
-    if (currentBubbleCount === history.length) {
-        let needsUpdate = false;
-        const bubbles = messagesContainer.querySelectorAll('.message-bubble');
-        if (history.length > 0) {
-            const firstBubble = bubbles[0];
-            const firstText = firstBubble ? firstBubble.querySelector('.msg-text') : null;
-            if (firstText) {
-                const expectedContent = history[0].isHtml ? history[0].content : '';
-                const actualContent = history[0].isHtml ? firstText.innerHTML : firstText.textContent;
-                if (actualContent !== expectedContent) needsUpdate = true;
-            }
-            const lastBubble = bubbles[bubbles.length - 1];
-            const lastText = lastBubble ? lastBubble.querySelector('.msg-text') : null;
-            if (lastText && history.length > 1) {
-                const lastMsg = history[history.length - 1];
-                const expectedContent = lastMsg.isHtml ? lastMsg.content : '';
-                const actualContent = lastMsg.isHtml ? lastText.innerHTML : lastText.textContent;
-                if (actualContent !== expectedContent) needsUpdate = true;
-            }
-        }
-        if (!needsUpdate) return;
-    }
-    messagesContainer.innerHTML = '';
+    messagesContainer.innerHTML = ''; // 清空并重新渲染
+    
+    let lastToolCalls = null; // 用于缓存助手调用工具时的参数
+
     history.forEach(msg => {
-        appendMessageBubble(msg.role, msg.content, msg.isHtml, msg.time);
+        try { // 【防崩溃装甲】：独立捕获每条消息的错误，绝不影响整体
+            const rawContent = msg.content || '';
+
+            // 记录助手的 tool_calls 参数，供后面的 tool 气泡提取"输入参数"使用
+            if (msg.role === 'assistant' && msg.tool_calls) {
+                lastToolCalls = msg.tool_calls;
+            }
+
+            if (msg.role === 'tool') {
+                if (msg.isHtml && typeof rawContent === 'string' && rawContent.includes('<details')) {
+                    // 1. 本地缓存的已包装好的 HTML，直接使用
+                    appendMessageBubble(msg.role, rawContent, true, msg.time);
+                } else {
+                    // 2. 后端同步过来的原生数据，需要转换为漂亮样式的 HTML
+                    let args = '{}';
+                    if (Array.isArray(lastToolCalls)) {
+                        // 尝试匹配对应 id 的 tool_call
+                        const tc = lastToolCalls.find(t => 
+                            t.id === msg.tool_call_id || 
+                            (t.function && t.function.name === msg.name)
+                        );
+                        if (tc && tc.function && tc.function.arguments) {
+                            args = tc.function.arguments;
+                        }
+                    }
+
+                    // 强制拆分写法，防止代码压缩或 Markdown 解析器吞噬转义符号
+                    const escHtml = (s) => String(s)
+                        .replace(/&/g, "&" + "amp;")
+                        .replace(/</g, "&" + "lt;")
+                        .replace(/>/g, "&" + "gt;");
+
+                    const htmlContent = [
+                        '<details>', 
+                        '<summary>⚙️ 工具 [', escHtml(msg.name || '未知'), '] 执行完毕 ✅</summary>',
+                        '<div class="tool-section-label">📥 输入参数</div>',
+                        '<pre class="tool-output tool-input">', escHtml(args), '</pre>',
+                        '<div class="tool-section-label">📤 输出结果</div>',
+                        '<pre class="tool-output">', escHtml(rawContent), '</pre>',
+                        '</details>'
+                    ].join('');
+                    
+                    appendMessageBubble(msg.role, htmlContent, true, msg.time);
+                }
+            } else if (msg.role === 'assistant') {
+                // 如果是只包含 tool_calls 没有 content 的"静默"过渡消息，不渲染空文本气泡
+                if (!rawContent && msg.tool_calls && msg.tool_calls.length > 0) {
+                    return; 
+                }
+                appendMessageBubble(msg.role, rawContent, msg.isHtml, msg.time);
+            } else {
+                // user 等其他角色的消息
+                appendMessageBubble(msg.role, rawContent, msg.isHtml, msg.time);
+            }
+        } catch (err) {
+            console.error("[前端防御] 渲染某条历史消息时出错，已自动跳过:", err, msg);
+        }
     });
+    
+    scrollToBottom();
 }
 
 // ---- 智能滚动 ----

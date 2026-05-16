@@ -188,7 +188,10 @@ function handleServerEvent(payload, sessionId) {
             break;
 
         case 'content':
-            if (isCurrentSession && activeAssistantMessageBubble) {
+            if (isCurrentSession) {
+                if (!activeAssistantMessageBubble) {
+                    activeAssistantMessageBubble = appendMessageBubble('assistant', '');
+                }
                 activeAssistantMessageBubble.querySelector('.msg-text').textContent += payload.data;
                 scrollToBottom();
             }
@@ -205,7 +208,8 @@ function handleServerEvent(payload, sessionId) {
         case 'end':
             if (isCurrentSession) {
                 if (activeAssistantMessageBubble) {
-                    saveAssistantToLocal(sessionId, activeAssistantMessageBubble.querySelector('.msg-text').textContent);
+                    const txt = activeAssistantMessageBubble.querySelector('.msg-text').textContent;
+                    if (txt.trim()) saveAssistantToLocal(sessionId, txt);
                 }
                 activeAssistantMessageBubble = null;
                 sendBtn.disabled = false;
@@ -236,7 +240,18 @@ function handleServerEvent(payload, sessionId) {
 // ---- 工具状态处理（当前会话） ----
 function handleToolStatusForCurrent(payload, sessionId) {
     if (payload.status === 'start') {
-        const toolBubble = appendMessageBubble('tool', `\u2699\uFE0F \u6B63\u5728\u8C03\u7528\u5DE5\u5177: ${payload.name} ...`);
+        if (activeAssistantMessageBubble) {
+            const txt = activeAssistantMessageBubble.querySelector('.msg-text').textContent;
+            if (txt.trim()) {
+                saveAssistantToLocal(sessionId, txt);
+            } else {
+                // 【修复点】：如果这个气泡是空的，彻底从页面 DOM 节点中删除它，不留占位！
+                activeAssistantMessageBubble.remove();
+            }
+            activeAssistantMessageBubble = null;
+        }
+        
+        const toolBubble = appendMessageBubble('tool', `⚙️ 正在调用工具: ${payload.name} ...`);
         activeToolBubbles[payload.name] = toolBubble;
     } else if (payload.status === 'result') {
         const toolBubble = activeToolBubbles[payload.name];
