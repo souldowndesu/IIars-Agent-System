@@ -15,7 +15,10 @@ const currentSessionTitle = document.getElementById('current-session-title');
 
 // 状态管理
 let currentSessionId = null;
-let currentEventSource = null;
+// SSE 连接池：每个 session 独立的 EventSource，切换会话不断开旧连接
+const eventSources = new Map();  // Map<sessionId, EventSource>
+// 连接状态跟踪：connected / disconnected
+const connectionStatus = new Map();  // Map<sessionId, 'connected'|'disconnected'>
 let activeAssistantMessageBubble = null;
 let activeToolBubbles = {};
 
@@ -44,22 +47,27 @@ function sanitizeLocalStorage() {
                 validKeys[key] = localSessionsData[key];
             }
         } else if (/^temp-\d+$/.test(key)) {
-            // 保留有效 temp-N 格式
-            validKeys[key] = localSessionsData[key];
+            // 保留有效 temp-N 格式（跳过 temp-0）
             const num = parseInt(key.replace('temp-', ''), 10);
-            if (num > maxTempNum) maxTempNum = num;
+            if (num > 0) {
+                validKeys[key] = localSessionsData[key];
+                if (num > maxTempNum) maxTempNum = num;
+            }
         }
-        // 丢弃所有其他格式（compact_、chat_、temp_xxx 旧格式等）
+        // 丢弃所有其他格式（compact_、chat_、temp_xxx 旧格式、temp-0）
     });
     if (maxTempNum > 0) {
         localStorage.setItem('tempCounter', String(maxTempNum));
+    } else {
+        // 清除无效计数器，确保下次从 1 开始
+        localStorage.removeItem('tempCounter');
     }
     localSessionsData = validKeys;
     saveLocalData();
     // 清理隐藏列表中的无效条目
     const validHiddenSet = new Set();
     hiddenTempIds.forEach(id => {
-        if (/^temp-\d+$/.test(id)) validHiddenSet.add(id);
+        if (/^temp-[1-9]\d*$/.test(id)) validHiddenSet.add(id);
     });
     hiddenTempIds = validHiddenSet;
     localStorage.setItem('hiddenTempIds', JSON.stringify([...hiddenTempIds]));
@@ -249,17 +257,78 @@ function cleanTempChats() {
     console.log(`[Frontend] 已隐藏 ${visibleTempIds.length} 个临时对话（数据未删除）`);
 }
 
+// 从服务端同步消息并渲染（不切换 SSE，仅刷新消息显示）
+async function syncAndRenderHistory(sessionId) {
+    try {
+        const sessionType = getSessionType(sessionId);
+        const resp = await fetch(
+            `${BASE_URL}/get-history?session_id=${encodeURIComponent(sessionId)}&session_type=${encodeURIComponent(sessionType)}`
+        );
+        const data = await resp.json();
+        if (data.status === 'ok' && data.messages && data.messages.length > 0) {
+            localSessionsData[sessionId] = data.messages;
+            saveLocalData();
+            console.log(`[Frontend] 从服务端同步了 ${data.messages.length} 条消息 (${sessionId})`);
+            return data.messages;
+        }
+    } catch (err) {
+        console.warn('[Frontend] 服务端历史同步失败，降级使用本地缓存:', err);
+    }
+    return localSessionsData[sessionId] || [];
+}
+
+// 仅重新渲染消息容器（不清空再重建，避免闪烁；改用 diff 风格替换）
+function reRenderMessages(sessionId) {
+    const history = localSessionsData[sessionId] || [];
+    // 仅在内容变化时才重建 DOM，避免无谓的闪烁
+    const currentBubbleCount = messagesContainer.querySelectorAll('.message-bubble').length;
+    if (currentBubbleCount === history.length) {
+        // 数量相同，快速比对第一条和最后一条内容
+        let needsUpdate = false;
+        const bubbles = messagesContainer.querySelectorAll('.message-bubble');
+        if (history.length > 0) {
+            const firstBubble = bubbles[0];
+            const firstText = firstBubble ? firstBubble.querySelector('.msg-text') : null;
+            if (firstText) {
+                const expectedContent = history[0].isHtml ? history[0].content : '';
+                const actualContent = history[0].isHtml ? firstText.innerHTML : firstText.textContent;
+                if (actualContent !== expectedContent) needsUpdate = true;
+            }
+            const lastBubble = bubbles[bubbles.length - 1];
+            const lastText = lastBubble ? lastBubble.querySelector('.msg-text') : null;
+            if (lastText && history.length > 1) {
+                const lastMsg = history[history.length - 1];
+                const expectedContent = lastMsg.isHtml ? lastMsg.content : '';
+                const actualContent = lastMsg.isHtml ? lastText.innerHTML : lastText.textContent;
+                if (actualContent !== expectedContent) needsUpdate = true;
+            }
+        }
+        if (!needsUpdate) return;  // 无变化，不重建
+    }
+    // 有变化，重建
+    messagesContainer.innerHTML = '';
+    history.forEach(msg => {
+        appendMessageBubble(msg.role, msg.content, msg.isHtml, msg.time);
+    });
+}
+
+// 获取当前会话的 EventSource（从连接池查找）
+function getCurrentEventSource() {
+    return eventSources.get(currentSessionId) || null;
+}
+
 // 切换对话
 async function switchSession(sessionId) {
     if (currentSessionId === sessionId) return;
 
-    if (currentEventSource) {
-        currentEventSource.close();
-        console.log(`[Frontend] 已主动断开会话 ${currentSessionId} 的连接`);
-        currentEventSource = null;
-    }
-
+    // 不再关闭旧 SSE 连接！让后台会话继续接收流式消息
+    const oldSessionId = currentSessionId;
     currentSessionId = sessionId;
+
+    // 清理上一个会话的 UI 状态
+    activeAssistantMessageBubble = null;
+    activeToolBubbles = {};
+    userManuallyScrolledUp = false;
 
     // 更新标题
     let titleText = sessionId;
@@ -277,37 +346,101 @@ async function switchSession(sessionId) {
     hideFollowUpHint();
 
     // 从服务端同步最新历史，覆盖 localStorage 缓存
-    messagesContainer.innerHTML = '';
+    await syncAndRenderHistory(sessionId);
+
+    // 刷新后端 LLM 上下文（load_history），确保多轮对话连续性
+    const sessionType = getSessionType(sessionId);
     try {
-        const sessionType = getSessionType(sessionId);
-        const resp = await fetch(
-            `${BASE_URL}/get-history?session_id=${encodeURIComponent(sessionId)}&session_type=${encodeURIComponent(sessionType)}`
-        );
-        const data = await resp.json();
-        if (data.status === 'ok' && data.messages && data.messages.length > 0) {
-            // 用服务端数据更新 localStorage
-            localSessionsData[sessionId] = data.messages;
-            saveLocalData();
-            console.log(`[Frontend] 从服务端同步了 ${data.messages.length} 条消息 (${sessionId})`);
-        }
-    } catch (err) {
-        console.warn('[Frontend] 服务端历史同步失败，降级使用本地缓存:', err);
+        await fetch(`${BASE_URL}/cmd?session_id=${encodeURIComponent(sessionId)}&session_type=${encodeURIComponent(sessionType)}&cmd=refresh`, { method: 'POST' });
+        console.log(`[Frontend] 已刷新后端 LLM 上下文: ${sessionId}`);
+    } catch (refreshErr) {
+        console.warn(`[Frontend] refresh 失败（非致命）: ${refreshErr}`);
     }
 
-    // 恢复历史消息
-    const history = localSessionsData[sessionId] || [];
-    history.forEach(msg => {
-        appendMessageBubble(msg.role, msg.content, msg.isHtml, msg.time);
-    });
+    reRenderMessages(sessionId);
 
     messageInput.disabled = false;
     sendBtn.disabled = false;
 
     renderChatList();
-    connectSSE(sessionId);
 
-    // 更新压缩按钮状态
+    // 为目标 session 建立新 SSE（如果尚未连接）
+    ensureConnected(sessionId);
+
+    // 更新标题栏按钮
+    updateConnectionButton();
     updateCompactButton();
+
+    console.log(`[Frontend] 切换到会话: ${sessionId}（旧会话 ${oldSessionId} 的连接保留）`);
+}
+
+// 确保指定会话已连接（从连接池复用或新建）
+function ensureConnected(sessionId) {
+    if (eventSources.has(sessionId)) {
+        // 已有活跃连接，复用
+        console.log(`[Frontend] 复用已有 SSE 连接: ${sessionId}`);
+        return;
+    }
+    if (connectionStatus.get(sessionId) === 'disconnected') {
+        // 用户手动断开过，不自动重连
+        console.log(`[Frontend] 会话 ${sessionId} 已被手动断开，跳过自动连接`);
+        return;
+    }
+    connectSSE(sessionId);
+}
+
+// 断开当前会话的 SSE 连接
+function disconnectCurrentSession() {
+    if (!currentSessionId) return;
+    const es = eventSources.get(currentSessionId);
+    if (es) {
+        es.close();
+        eventSources.delete(currentSessionId);
+        console.log(`[Frontend] 手动断开会话: ${currentSessionId}`);
+    }
+    connectionStatus.set(currentSessionId, 'disconnected');
+    updateConnectionButton();
+    renderChatList();
+}
+
+// 重新连接当前会话
+function reconnectCurrentSession() {
+    if (!currentSessionId) return;
+    connectionStatus.set(currentSessionId, 'connected');
+    connectSSE(currentSessionId);
+    updateConnectionButton();
+    renderChatList();
+}
+
+// 更新连接按钮状态
+function updateConnectionButton() {
+    const btn = document.getElementById('connection-toggle-btn');
+    if (!btn || !currentSessionId) return;
+    const status = connectionStatus.get(currentSessionId);
+    const connected = eventSources.has(currentSessionId) && status !== 'disconnected';
+    if (connected) {
+        btn.textContent = '🔗 已连接';
+        btn.classList.add('connected');
+        btn.classList.remove('disconnected');
+        btn.title = '点击断开当前会话的连接';
+        btn.onclick = disconnectCurrentSession;
+    } else {
+        btn.textContent = '❌ 未连接';
+        btn.classList.add('disconnected');
+        btn.classList.remove('connected');
+        btn.title = '点击重新连接当前会话';
+        btn.onclick = reconnectCurrentSession;
+    }
+}
+
+// 获取会话连接状态（用于侧边栏指示灯）
+function getSessionConnectionStatus(sessionId) {
+    const es = eventSources.get(sessionId);
+    const status = connectionStatus.get(sessionId);
+    if (status === 'disconnected') return 'manual-off';
+    if (es && es.readyState === EventSource.OPEN) return 'connected';
+    if (es && es.readyState === EventSource.CONNECTING) return 'connecting';
+    return 'none';
 }
 
 // 更新压缩按钮可见性和状态
@@ -345,8 +478,8 @@ async function startCompact() {
         );
         console.log('[Compact] flush 完成:', await flushRes.json());
 
-        // 步骤 2: 发送压缩指令到 compact 会话
-        compactSessionId = generateSessionId('compact');
+        // 步骤 2: 发送压缩指令到 compact 会话（使用主会话 ID，确保压缩摘要在同一命名空间下）
+        compactSessionId = currentSessionId;
         compactStatus.textContent = '\u6B65\u9AA4 2/4: \u542F\u52A8\u538B\u7F29\u4F1A\u8BDD...';
         console.log(`[Compact] 步骤 2: 启动 compact 会话 ${compactSessionId}`);
 
@@ -426,13 +559,17 @@ function handleCompactEvent(payload) {
 
 async function finishCompactWithRefresh() {
     try {
-        // 步骤 4: refresh main
+        // 步骤 4: refresh main (服务端重新组装消息列表)
         const refreshRes = await fetch(
             `${BASE_URL}/cmd?session_id=${encodeURIComponent(currentSessionId)}&session_type=main&cmd=refresh`,
             { method: 'POST' }
         );
         const refreshData = await refreshRes.json();
         console.log('[Compact] refresh 完成:', refreshData);
+
+        // 步骤 5: 从服务端同步更新后的消息列表到前端
+        await syncAndRenderHistory(currentSessionId);
+        reRenderMessages(currentSessionId);
 
         compactStatus.textContent = '\u2705 \u538B\u7F29\u5B8C\u6210\uFF01\u4E3B\u4F1A\u8BDD\u5DF2\u66F4\u65B0';
         compactStatus.className = 'compact-status done';
@@ -460,59 +597,154 @@ function finishCompact() {
     updateCompactButton();
 }
 
-// 建立 SSE 连接
+// 建立 SSE 连接（加入连接池，每个 session 独立连接）
 function connectSSE(sessionId) {
-    console.log(`[Frontend] 尝试连接到会话: ${sessionId}`);
+    // 如果已存在连接（且处于 OPEN/CONNECTING 状态），先关闭旧连接
+    const oldEs = eventSources.get(sessionId);
+    if (oldEs && (oldEs.readyState === EventSource.OPEN || oldEs.readyState === EventSource.CONNECTING)) {
+        oldEs.close();
+        console.log(`[Frontend] 关闭旧 SSE: ${sessionId}`);
+    }
 
+    console.log(`[Frontend] 建立 SSE 连接到会话: ${sessionId}`);
     const sessionType = getSessionType(sessionId);
 
-    currentEventSource = new EventSource(
+    const es = new EventSource(
         `${BASE_URL}/stream?session_id=${encodeURIComponent(sessionId)}&session_type=${encodeURIComponent(sessionType)}`
     );
 
-    currentEventSource.onmessage = function (event) {
-        const payload = JSON.parse(event.data);
-        handleServerEvent(payload);
+    // 绑定的 sessionId 闭包保存
+    const boundSessionId = sessionId;
+
+    es.onopen = function () {
+        console.log(`[Frontend] SSE 已打开: ${boundSessionId}`);
+        connectionStatus.set(boundSessionId, 'connected');
+        if (boundSessionId === currentSessionId) {
+            updateConnectionButton();
+        }
+        renderChatList();
     };
 
-    currentEventSource.onerror = function (err) {
-        console.error(`[Frontend] SSE 连接发生错误 (会话: ${sessionId})`, err);
+    es.onmessage = function (event) {
+        const payload = JSON.parse(event.data);
+        handleServerEvent(payload, boundSessionId);
     };
+
+    es.onerror = function (err) {
+        // 忽略过时 EventSource 实例的错误（已被新连接替换的旧实例）
+        if (eventSources.get(boundSessionId) !== es) {
+            console.log(`[Frontend] 忽略过时 SSE 错误 (${boundSessionId})`);
+            return;
+        }
+        console.error(`[Frontend] SSE 连接错误 (${boundSessionId})`, err);
+        // 连接断开时更新状态
+        if (es.readyState === EventSource.CLOSED) {
+            connectionStatus.set(boundSessionId, 'disconnected');
+            eventSources.delete(boundSessionId);
+            if (boundSessionId === currentSessionId) {
+                updateConnectionButton();
+            }
+            renderChatList();
+
+            // 非手动断开时自动重连（3秒后）
+            setTimeout(() => {
+                if (connectionStatus.get(boundSessionId) !== 'disconnected') {
+                    console.log(`[Frontend] 自动重连: ${boundSessionId}`);
+                    connectSSE(boundSessionId);
+                }
+            }, 3000);
+        }
+    };
+
+    eventSources.set(sessionId, es);
+    connectionStatus.set(sessionId, 'connected');
+
+    if (sessionId === currentSessionId) {
+        updateConnectionButton();
+    }
+    renderChatList();
 }
 
+// 页面卸载时清理所有 SSE 连接
+window.addEventListener('beforeunload', () => {
+    eventSources.forEach((es, sid) => {
+        es.close();
+        console.log(`[Frontend] 页面卸载，关闭 SSE: ${sid}`);
+    });
+    eventSources.clear();
+    if (compactEventSource) {
+        compactEventSource.close();
+        compactEventSource = null;
+    }
+});
+
 // 处理服务端事件
-function handleServerEvent(payload) {
+function handleServerEvent(payload, sessionId) {
+    const isCurrentSession = (sessionId === currentSessionId);
+
     switch (payload.event) {
         case 'start':
-            hideFollowUpHint();
-            userManuallyScrolledUp = false;  // 新一轮对话，重置滚动标记
-            activeAssistantMessageBubble = appendMessageBubble('assistant', '');
+            if (isCurrentSession) {
+                hideFollowUpHint();
+                // 不重置 userManuallyScrolledUp！保留用户的上翻状态
+                activeAssistantMessageBubble = appendMessageBubble('assistant', '');
+            } else {
+                // 后台会话：静默记录到 localSessionsData，不操作 UI
+                console.log(`[Frontend] 后台会话 ${sessionId} 开始生成`);
+            }
             break;
 
         case 'content':
-            if (activeAssistantMessageBubble) {
+            if (isCurrentSession && activeAssistantMessageBubble) {
                 activeAssistantMessageBubble.querySelector('.msg-text').textContent += payload.data;
                 scrollToBottom();
             }
             break;
 
         case 'tool_status':
-            if (payload.status === 'start') {
-                const toolBubble = appendMessageBubble('tool', `\u2699\uFE0F \u6B63\u5728\u8C03\u7528\u5DE5\u5177: ${payload.name} ...`);
-                activeToolBubbles[payload.name] = toolBubble;
-            } else if (payload.status === 'result') {
-                const toolBubble = activeToolBubbles[payload.name];
-                if (toolBubble) {
-                    const statusIcon = payload.executed_well ? '\u2705' : '\u274C';
+            if (isCurrentSession) {
+                if (payload.status === 'start') {
+                    const toolBubble = appendMessageBubble('tool', `\u2699\uFE0F \u6B63\u5728\u8C03\u7528\u5DE5\u5177: ${payload.name} ...`);
+                    activeToolBubbles[payload.name] = toolBubble;
+                } else if (payload.status === 'result') {
+                    const toolBubble = activeToolBubbles[payload.name];
+                    if (toolBubble) {
+                        const statusIcon = payload.executed_well ? '\u2705' : '\u274C';
 
+                        const escHtml = (s) => String(s)
+                            .replace(/&/g, "&" + "amp;")
+                            .replace(/</g, "&" + "lt;")
+                            .replace(/>/g, "&" + "gt;");
+
+                        const escArgs = escHtml(payload.tool_args || "{}");
+                        const escOutput = escHtml(payload.result_data || "\u65E0\u8FD4\u56DE\u7ED3\u679C");
+
+                        const htmlContent = [
+                            '<details open>',
+                            '<summary>\u2699\uFE0F \u5DE5\u5177 [', escHtml(payload.name), '] \u6267\u884C\u5B8C\u6BD5 ', statusIcon, '</summary>',
+                            '<div class="tool-section-label">\uD83D\uDCE5 \u8F93\u5165\u53C2\u6570</div>',
+                            '<pre class="tool-output tool-input">', escArgs, '</pre>',
+                            '<div class="tool-section-label">\uD83D\uDCE4 \u8F93\u51FA\u7ED3\u679C</div>',
+                            '<pre class="tool-output">', escOutput, '</pre>',
+                            '</details>'
+                        ].join('');
+
+                        toolBubble.querySelector('.msg-text').innerHTML = htmlContent;
+                        saveMessageToLocal(sessionId, 'tool', htmlContent, true);
+                        delete activeToolBubbles[payload.name];
+                        scrollToBottom();
+                    }
+                }
+            } else {
+                // 后台会话：静默保存 tool 结果到本地存储
+                if (payload.status === 'result') {
                     const escHtml = (s) => String(s)
                         .replace(/&/g, "&" + "amp;")
                         .replace(/</g, "&" + "lt;")
                         .replace(/>/g, "&" + "gt;");
-
                     const escArgs = escHtml(payload.tool_args || "{}");
                     const escOutput = escHtml(payload.result_data || "\u65E0\u8FD4\u56DE\u7ED3\u679C");
-
+                    const statusIcon = payload.executed_well ? '\u2705' : '\u274C';
                     const htmlContent = [
                         '<details open>',
                         '<summary>\u2699\uFE0F \u5DE5\u5177 [', escHtml(payload.name), '] \u6267\u884C\u5B8C\u6BD5 ', statusIcon, '</summary>',
@@ -522,29 +754,41 @@ function handleServerEvent(payload) {
                         '<pre class="tool-output">', escOutput, '</pre>',
                         '</details>'
                     ].join('');
-
-                    toolBubble.querySelector('.msg-text').innerHTML = htmlContent;
-                    saveMessageToLocal(currentSessionId, 'tool', htmlContent, true);
-                    delete activeToolBubbles[payload.name];
-                    scrollToBottom();
+                    saveMessageToLocal(sessionId, 'tool', htmlContent, true);
+                    console.log(`[Frontend] 后台会话 ${sessionId} 工具 [${payload.name}] 结果已保存`);
                 }
             }
             break;
 
         case 'end':
-            if (activeAssistantMessageBubble) {
-                saveAssistantToLocal(currentSessionId, activeAssistantMessageBubble.querySelector('.msg-text').textContent);
+            if (isCurrentSession) {
+                if (activeAssistantMessageBubble) {
+                    saveAssistantToLocal(sessionId, activeAssistantMessageBubble.querySelector('.msg-text').textContent);
+                }
+                activeAssistantMessageBubble = null;
+                sendBtn.disabled = false;
+                showFollowUpHint();
+            } else {
+                // 后台会话完成：从服务端同步完整消息列表
+                console.log(`[Frontend] 后台会话 ${sessionId} 生成完成，同步历史`);
+                syncAndRenderHistory(sessionId).then(() => {
+                    // 如果此时用户已切回该会话，刷新显示
+                    if (currentSessionId === sessionId) {
+                        reRenderMessages(sessionId);
+                    }
+                });
             }
-            activeAssistantMessageBubble = null;
-            sendBtn.disabled = false;
-            showFollowUpHint();
             break;
 
         case 'error':
-            appendMessageBubble('assistant', `[\u7CFB\u7EDF\u9519\u8BEF]: ${payload.error_msg}`);
-            activeAssistantMessageBubble = null;
-            sendBtn.disabled = false;
-            showFollowUpHint();
+            if (isCurrentSession) {
+                appendMessageBubble('assistant', `[\u7CFB\u7EDF\u9519\u8BEF]: ${payload.error_msg}`);
+                activeAssistantMessageBubble = null;
+                sendBtn.disabled = false;
+                showFollowUpHint();
+            } else {
+                console.error(`[Frontend] 后台会话 ${sessionId} 错误: ${payload.error_msg}`);
+            }
             break;
     }
 }

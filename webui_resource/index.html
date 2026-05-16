@@ -51,17 +51,10 @@
         </main>
     </div>
 
-    <!-- JS 模块（按依赖顺序加载） -->
-    <script src="js/config.js"></script>
-    <script src="js/state.js"></script>
-    <script src="js/utils.js"></script>
-    <script src="js/message-bubble.js"></script>
-    <script src="js/chat-list.js"></script>
-    <script src="js/session-switch.js"></script>
-    <script src="js/sse-client.js"></script>
-    <script src="js/message-send.js"></script>
-    <script src="js/compact.js"></script>
-    <script src="js/ui.js"></script>
-    <script src="js/main.js"></script>
+    <!-- JS 模块（按依赖顺序加载：状态 → UI → 核心逻辑 → 入口初始化） -->
+    <script src="js/app-state.js"></script>
+    <script src="js/app-ui.js"></script>
+    <script src="js/app-core.js"></script>
+    <script src="js/app-init.js"></script>
 </body>
 </html>
