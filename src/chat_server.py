@@ -150,6 +150,13 @@ class ChatApp: #转发端口
                     await active_llm.load_history(session_id, session_type)
                 return {"status":"refreshed"}
             
+            elif cmd == "interrupt":
+                key = f"{session_id}:{session_type}"
+                if key in self.session_manager.active_sessions:
+                    active_llm = self.session_manager.active_sessions[key]["llm"]
+                    active_llm.interrupt()
+                return {"status": "interrupt_sent"}
+            
             return {"status": "unknown_cmd"}
         
         @self.app.get("/get-history")
@@ -159,15 +166,15 @@ class ChatApp: #转发端口
             try:
                 key = f"{session_id}:{session_type}"
                 active = self.session_manager.active_sessions.get(key)
-                if active and hasattr(active.get("llm"), "messages"):
+                if active and hasattr(active.get("llm"),"messages"):
                     # 从内存 LLM 实例直接读取完整消息列表（含 tool_calls / name 等完整字段）
                     llm_messages = active["llm"].messages
                     for msg in llm_messages:
                         role = msg.get("role","")
                         if role == "system":
-                            continue  # 系统提示词不需要展示
+                            continue
                         content = msg.get("content") or ""
-                        is_html = (role == "tool")
+                        is_html = msg.get("isHtml") or msg.get("is_html") or False
                         messages.append({
                             "role":role,
                             "content":content,
@@ -199,7 +206,7 @@ class ChatApp: #转发端口
                                 logger.warning(f"跳过损坏的消息记录: {str(raw_data)[:80]} - {e}")
                                 continue
                             role = msg.get("role","")
-                            is_html = (role=="tool")
+                            is_html = msg.get("isHtml") or msg.get("is_html") or False
                             messages.append({
                                 "role":role,
                                 "content":msg.get("content") or "",
@@ -217,9 +224,16 @@ class ChatApp: #转发端口
                 return {"status":"error","session_id":session_id,"messages":[],"error":str(e)}
 
         @self.app.post("/str-input") #需要将输入传输到该站点
-        async def generate(session_id:str,session_type:str,user_input:str): 
+        async def generate(session_id:str,session_type:str,user_input:str=None,message:str=None):
+            parsed_message = None
+            if message:
+                try:
+                    parsed_message = json.loads(message)
+                except json.JSONDecodeError:
+                    logger.error("解析 message 失败，必须是合法的 JSON 字符串")
+                    return {"status": "error", "msg": "Invalid JSON message"} 
             await self.session_manager.get_asyncllm(session_id,session_type)
-            asyncio.create_task(self.llm_worker(user_input,session_id,session_type))
+            asyncio.create_task(self.llm_worker(user_input,parsed_message,session_id,session_type))
             return {"status":"started","session_id":session_id}
 
         @self.app.get("/stream")
@@ -279,7 +293,7 @@ class ChatApp: #转发端口
         cleanup_task.cancel()
         await self.session_manager.save_all()
 
-    async def llm_worker(self,user_input:str,session_id:str,session_type:str):
+    async def llm_worker(self,user_input:str,message:dict,session_id:str,session_type:str):
         try:
             llm = await self.session_manager.get_asyncllm(session_id,session_type)   #获取对应的llm，更新一下时间记录
             await self.broadcaster.broadcast(session_id,{
@@ -287,8 +301,8 @@ class ChatApp: #转发端口
                 "session_id":session_id,
                 "prompt":user_input
                 })
-            self.session_manager.update_activity(session_id, session_type) 
-            async for res in llm.chat_stream(user_input=user_input):
+            self.session_manager.update_activity(session_id,session_type) 
+            async for res in llm.chat_stream(user_input=user_input,message=message):
                 event_type = res.get("type")    #获取具体执行结果类型
                 
                 if event_type == "content":
@@ -310,7 +324,12 @@ class ChatApp: #转发端口
                         "executed_well":res["result_status"],
                         "result_data": res.get("result_data", ""),
                         "tool_args": res.get("tool_args", "")
-                    })                
+                    })
+                elif event_type == "interrupt":
+                    await self.broadcaster.broadcast(session_id, {
+                        "event": "interrupt"
+                    })
+                    break
             await self.broadcaster.broadcast(session_id,{
                 "event":"end",
             })

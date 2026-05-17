@@ -257,6 +257,21 @@ function updateCompactButton() {
     }
 }
 
+function updateSendBtnState() {
+    const generating = !!isGenerating.get(currentSessionId);
+    if (generating) {
+        sendBtn.textContent = '\u23F9 \u7EC8\u6B62';
+        sendBtn.classList.add('stop-btn');
+        sendBtn.disabled = false;
+        messageInput.disabled = false;
+    } else {
+        sendBtn.textContent = '\u53D1\u9001';
+        sendBtn.classList.remove('stop-btn');
+        sendBtn.disabled = false;
+        messageInput.disabled = false;
+    }
+}
+
 function updateSessionTitle(sessionId) {
     let titleText = sessionId;
     if (sessionId.startsWith('temp-')) {

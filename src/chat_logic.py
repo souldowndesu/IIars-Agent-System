@@ -10,8 +10,8 @@ dotenv.load_dotenv()
 
 logger = logging.getLogger(__name__)
 
-MAIN_DB_PATH = "history/main_chat.db"
-COMPACT_DB_PATH = "history/compact_chat.db"
+MAIN_DB_PATH = "database/main_chat.db"
+COMPACT_DB_PATH = "database/compact_chat.db"
 
 class ToolRegistry:
     def __init__(self):
@@ -74,8 +74,8 @@ class AsyncLLM:
             )
         self.model = model or os.getenv("MODEL")
         
-        self.history_dir = "history"
-        os.makedirs(self.history_dir,exist_ok=True)
+        self.database_dir = "database"
+        os.makedirs(self.database_dir,exist_ok=True)
         
         self.messages = [{"role":"system","content":"你是一个助理，帮助用户解决基本的问题，请不要使用特殊字符或表情符，必要的时候可以调用工具"}]
         self.timestamps = [time.time()]
@@ -86,6 +86,12 @@ class AsyncLLM:
         #压缩的起始终止时间，0为异常值，可判别是否成功
         self.compact_start_time = 0.0
         self.compact_end_time = 0.0
+        
+        self._interrupted = False
+    
+    def interrupt(self):
+
+        self._interrupted = True
     
     async def chat_stream(self,user_input:str=None,message:dict=None):
         if user_input:
@@ -133,6 +139,36 @@ class AsyncLLM:
                             yield {"type":"tool_start","name":tool_calls_buffer[index]["name"]}  #只在第一次出现该工具时输出
                         if tc_delta.function.arguments:
                             tool_calls_buffer[index]["args"] += tc_delta.function.arguments #逐渐拼接tool_call的内容
+
+                #中断检测：外层每次chunk迭代后检查
+                if self._interrupted:
+                    # 将当前已累积的部分内容 + tool_calls 写入 messages
+                    partial_msg = {"role":"assistant","content":full_reply or None}
+                    if reasoning_reply:
+                        partial_msg["reasoning_content"] = reasoning_reply
+                    if tool_calls_buffer:
+                        formatted_calls = []
+                        for tc in tool_calls_buffer.values():
+                            formatted_calls.append({
+                                "id":tc["id"],
+                                "type":"function",
+                                "function":{"name":tc["name"],"arguments":tc["args"]}
+                            })
+                        partial_msg["tool_calls"] = formatted_calls
+                    # 中断时若既无 content 也无 tool_calls，设占位内容防止再次加载时报 API 错误
+                    if not partial_msg.get("content") and not partial_msg.get("tool_calls"):
+                        partial_msg["content"] = "[思考中]"
+                    self.messages.append(partial_msg)
+                    self.timestamps.append(time.time())
+                    #追加打断记录
+                    self.messages.append({
+                        "role":"assistant",
+                        "content":"[对话被打断]"
+                    })
+                    self.timestamps.append(time.time())
+                    self._interrupted = False
+                    yield {"type":"interrupt"}
+                    return  #直接退出整个 chat_stream 生成器
                             
             assistant_msg = {"role":"assistant","content":full_reply or None}
             

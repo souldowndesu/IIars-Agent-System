@@ -43,8 +43,7 @@ async function switchSession(sessionId) {
     hideFollowUpHint();
 
     // ★ 关键修复：确保输入框在切换时立即启用，避免 async 异常导致永久禁用
-    messageInput.disabled = false;
-    sendBtn.disabled = false;
+    updateSendBtnState();
 
     // 从服务端同步最新历史，覆盖 localStorage 缓存
     await syncAndRenderHistory(sessionId);
@@ -62,8 +61,7 @@ async function switchSession(sessionId) {
     reRenderMessages(sessionId);
 
     // ★ 修复：确保输入框最终启用（双重保险，即使上面某步抛异常）
-    messageInput.disabled = false;
-    sendBtn.disabled = false;
+    updateSendBtnState();
 
     renderChatList();
 
@@ -179,9 +177,11 @@ function handleServerEvent(payload, sessionId) {
 
     switch (payload.event) {
         case 'start':
+            isGenerating.set(sessionId, true);
             if (isCurrentSession) {
                 hideFollowUpHint();
                 activeAssistantMessageBubble = appendMessageBubble('assistant', '');
+                updateSendBtnState();
             } else {
                 console.log(`[Frontend] 后台会话 ${sessionId} 开始生成`);
             }
@@ -206,13 +206,14 @@ function handleServerEvent(payload, sessionId) {
             break;
 
         case 'end':
+            isGenerating.set(sessionId, false);
             if (isCurrentSession) {
                 if (activeAssistantMessageBubble) {
                     const txt = activeAssistantMessageBubble.querySelector('.msg-text').textContent;
                     if (txt.trim()) saveAssistantToLocal(sessionId, txt);
                 }
                 activeAssistantMessageBubble = null;
-                sendBtn.disabled = false;
+                updateSendBtnState();
                 showFollowUpHint();
             } else {
                 console.log(`[Frontend] 后台会话 ${sessionId} 生成完成，同步历史`);
@@ -225,13 +226,26 @@ function handleServerEvent(payload, sessionId) {
             break;
 
         case 'error':
+            isGenerating.set(sessionId, false);
             if (isCurrentSession) {
                 appendMessageBubble('assistant', `[\u7CFB\u7EDF\u9519\u8BEF]: ${payload.error_msg}`);
                 activeAssistantMessageBubble = null;
-                sendBtn.disabled = false;
+                updateSendBtnState();
                 showFollowUpHint();
             } else {
                 console.error(`[Frontend] 后台会话 ${sessionId} 错误: ${payload.error_msg}`);
+            }
+            break;
+
+        case 'interrupt':
+            isGenerating.set(sessionId, false);
+            if (isCurrentSession) {
+                appendMessageBubble('assistant', '\u23F9 \u751F\u6210\u5DF2\u7EC8\u6B62');
+                activeAssistantMessageBubble = null;
+                updateSendBtnState();
+                showFollowUpHint();
+            } else {
+                console.log(`[Frontend] 后台会话 ${sessionId} 生成已终止`);
             }
             break;
     }
@@ -310,6 +324,12 @@ function handleToolStatusForBackground(payload, sessionId) {
 
 // ---- 消息发送 ----
 async function sendMessage() {
+    // ★ 如果正在生成，改为发送终止指令
+    if (isGenerating.get(currentSessionId)) {
+        await sendInterrupt();
+        return;
+    }
+
     const text = messageInput.value.trim();
     if (!text || !currentSessionId) return;
 
@@ -334,6 +354,21 @@ async function sendMessage() {
         console.error("[Frontend] 消息发送异常:", error);
         appendMessageBubble('assistant', `[\u7F51\u7EDC\u9519\u8BEF]: \u65E0\u6CD5\u8FDE\u63A5\u5230\u751F\u6210\u8282\u70B9\u3002`);
         sendBtn.disabled = false;
+    }
+}
+
+// ---- 中断指令 ----
+async function sendInterrupt() {
+    if (!currentSessionId) return;
+    try {
+        const sessionType = getSessionType(currentSessionId);
+        await fetch(
+            `${BASE_URL}/cmd?session_id=${encodeURIComponent(currentSessionId)}&session_type=${encodeURIComponent(sessionType)}&cmd=interrupt`,
+            { method: 'POST' }
+        );
+        console.log('[Frontend] 已发送中断指令');
+    } catch (err) {
+        console.error('[Frontend] 发送中断指令失败:', err);
     }
 }
 

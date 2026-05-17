@@ -10,6 +10,7 @@ const BASE_URL = 'http://127.0.0.1:8001';
 let currentSessionId = null;
 const eventSources = new Map();          // Map<sessionId, EventSource>
 const connectionStatus = new Map();      // Map<sessionId, 'connected'|'disconnected'>
+const isGenerating = new Map();          // Map<sessionId, boolean>
 let activeAssistantMessageBubble = null;
 let activeToolBubbles = {};
 let userManuallyScrolledUp = false;
@@ -74,6 +75,7 @@ function getMainSessionId() {
 
 function getSessionType(sessionId) {
     if (sessionId.startsWith('temp-')) return 'temp';
+    if (sessionId === 'main') return 'main';
     if (sessionId.includes('_')) return sessionId.split('_')[0];
     return 'chat';
 }
