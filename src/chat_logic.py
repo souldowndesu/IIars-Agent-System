@@ -63,11 +63,53 @@ class ToolRegistry:
         else:
             return await asyncio.to_thread(func, **args)
 
-class AsyncLLM:
-    # 压缩专用的系统提示词，直接内置于类中
-    COMPACT_SYSTEM_PROMPT = "你是一个优秀的上下文总结专家。请对上述提供的对话记录进行高度提炼压缩，提取出核心事实、用户意图、已解决的结论，并舍弃所有无意义的寒暄。以简明扼要的陈述句返回。"
+class PromptLoader:
+    def __init__(self,base_dir:str=None):
+        self.base_dir = base_dir or "base_prompt"
+    
+    async def get_base_prompt(self,session_type:str)->str|None:
+        prompt_dir = os.path.join(self.base_dir,session_type)
+        if not os.path.isdir(prompt_dir):
+            logger.warning(f"Prompt 目录不存在: {prompt_dir}")
+            return None
+        
+        md_files = sorted(
+            [f for f in os.listdir(prompt_dir) if f.endswith(".md")]
+        )
+        if not md_files:
+            logger.warning(f"{prompt_dir} 下未找到 .md 文件")
+            return None
+        
+        parts = []
+        for filename in md_files:
+            file_path = os.path.join(prompt_dir,filename)
+            try:
+                async with aiofiles.open(file_path,"r",encoding="utf-8") as f:
+                    content = await f.read()
+                    parts.append(content)
+                    logger.info(f"已加载 prompt 片段: {file_path}")
+            except Exception as e:
+                logger.exception(f"读取 {file_path} 失败: {e}")
+        
+        if not parts:
+            return None
+        return "\n\n".join(parts)
+    
+    async def read_skill(self,skill_path:str)->str|None:
+        if not os.path.isfile(skill_path):
+            logger.warning(f"Skill 文件不存在: {skill_path}")
+            return None
+        try:
+            async with aiofiles.open(skill_path,"r",encoding="utf-8") as f:
+                content = await f.read()
+                logger.info(f"已读取 skill: {skill_path}")
+                return content
+        except Exception as e:
+            logger.exception(f"读取 skill {skill_path} 失败: {e}")
+            return None
 
-    def __init__(self,api_key:str=None,model:str=None,base_url:str=None,registry:ToolRegistry=None):
+class AsyncLLM:
+    def __init__(self,api_key:str=None,model:str=None,base_url:str=None,registry:ToolRegistry=None,prompt_loader:PromptLoader=None):
         self.client = AsyncOpenAI(
             api_key=api_key or os.getenv("API_KEY"),
             base_url=base_url or os.getenv("BASE_URL")
@@ -77,11 +119,14 @@ class AsyncLLM:
         self.database_dir = "database"
         os.makedirs(self.database_dir,exist_ok=True)
         
-        self.messages = [{"role":"system","content":"你是一个助理，帮助用户解决基本的问题，请不要使用特殊字符或表情符，必要的时候可以调用工具"}]
+        self.messages = [{"role":"system","content":"你是一个agent程序的llm核心，如果你接收到了这条提示，说明正确的提示词并未正式加载，你需要提醒用户这一点"}]
         self.timestamps = [time.time()]
         
-        self.registry = registry    #注册的tools 
+        self.use_tool = 1
+        self.registry = registry if self.use_tool==1 else None    #注册的tools 
         self._saved_index = 0   #已经保存的数量,防止重复保存,标记了messages中保存过的数量
+        
+        self.prompt_loader =  prompt_loader or PromptLoader()
         
         #压缩的起始终止时间，0为异常值，可判别是否成功
         self.compact_start_time = 0.0
@@ -89,6 +134,34 @@ class AsyncLLM:
         
         self._interrupted = False
     
+    async def load_prompt(self,prompt_type:str=None):
+        prompt_text = await self.prompt_loader.get_base_prompt(prompt_type)
+        
+        if prompt_text is None:
+            self.messages.append({"role":"system","content":"你是一个agent程序的llm核心，如果你接收到了这条提示，说明正确的提示词并未正式加载，你需要提醒用户这一点，然后将现在的历史记录总结一下"})
+            self.timestamps.append(time.time())
+            self._saved_index += 1
+            logger.error(f"{prompt_type} 类型 提示词加载失败")
+        else:
+            self.messages.append({"role":"system","content":prompt_text})
+            self.timestamps.append(time.time())
+            self._saved_index += 1
+            logger.info(f"已加载 {prompt_type} 类型 system prompt")
+    
+    async def load_skill(self,skill_path:str=None):
+        skill_text = await self.prompt_loader.read_skill(skill_path)
+        
+        if skill_text is None:
+            self.messages.append({"role":"system","content":f"{skill_path} 位置的skill加载失败"})
+            self.timestamps.append(time.time())
+            self._saved_index += 1
+            logger.error(f"{skill_path} 位置skill加载失败")
+        else:
+            self.messages.append({"role":"system","content":skill_text})
+            self.timestamps.append(time.time())
+            self._saved_index += 1
+            logger.info(f"已加载 {skill_path} 处的skill")
+            
     def interrupt(self):
 
         self._interrupted = True
@@ -234,8 +307,9 @@ class AsyncLLM:
         
     async def load_history(self,session_id:str,session_type:str):
         #初始化：保留系统提示词
-        self.messages = [{"role": "system","content": "你是一个助理，帮助用户解决基本的问题，请不要使用特殊字符或表情符，必要的时候可以调用工具"}]
-        self.timestamps = [time.time()]
+        self.messages = []
+        self.timestamps = []
+        await self.load_prompt(session_type)
         
         if session_type == "main":
             #从compact库加载最新压缩摘要（作为历史上下文）
@@ -291,11 +365,7 @@ class AsyncLLM:
             self._saved_index = len(self.messages)
             logger.info(f"加载 temp 类型历史记录成功，共 {len(self.messages)} 条上下文明细。")
 
-        elif session_type == "compact":
-            #使用压缩专用提示词，并加载main中未压缩的原始消息作为原材料
-            self.messages = [{"role":"system","content":self.COMPACT_SYSTEM_PROMPT}]
-            self.timestamps = [time.time()]
-            
+        elif session_type == "compact":         
             async with aiosqlite.connect(MAIN_DB_PATH) as db_main:
                 try:
                     async with db_main.execute(
