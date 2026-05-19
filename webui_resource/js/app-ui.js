@@ -18,6 +18,34 @@ let compactPanel = null;
 let compactStatus = null;
 let compactContent = null;
 
+// ---- IntersectionObserver 哨兵滚动系统 ----
+let scrollSentinel = null;
+let sentinelObserver = null;
+let isPinnedToBottom = true;   // true = 用户处于底部/跟随模式
+
+function setupScrollSentinel() {
+    // 创建哨兵元素（放在 messagesContainer 底部）
+    scrollSentinel = document.createElement('div');
+    scrollSentinel.id = 'scroll-sentinel';
+    scrollSentinel.style.cssText = 'height:1px;width:100%;flex-shrink:0;';
+    messagesContainer.appendChild(scrollSentinel);
+
+    // IntersectionObserver：精准确认用户是否处于滚动容器底部
+    sentinelObserver = new IntersectionObserver(
+        (entries) => {
+            // 当哨兵完全在视口内 → 用户在底部
+            entries.forEach(entry => {
+                isPinnedToBottom = entry.isIntersecting;
+            });
+        },
+        {
+            root: messagesContainer,
+            threshold: 1.0    // 哨兵 100% 可见才算在底部
+        }
+    );
+    sentinelObserver.observe(scrollSentinel);
+}
+
 function initUIDOMRefs(refs) {
     messagesContainer     = refs.messagesContainer;
     chatListUl            = refs.chatListUl;
@@ -31,6 +59,9 @@ function initUIDOMRefs(refs) {
     compactPanel          = refs.compactPanel;
     compactStatus         = refs.compactStatus;
     compactContent        = refs.compactContent;
+
+    // DOM 引用就绪后立即建立哨兵
+    setupScrollSentinel();
 }
 
 // ---- 消息气泡 ----
@@ -55,7 +86,8 @@ function appendMessageBubble(role, content, isHtml = false, savedTime = null) {
 
     wrapper.appendChild(timeDiv);
     wrapper.appendChild(textDiv);
-    messagesContainer.appendChild(wrapper);
+    // 在哨兵之前插入消息气泡
+    messagesContainer.insertBefore(wrapper, scrollSentinel);
     scrollToBottom();
     return wrapper;
 }
@@ -64,30 +96,57 @@ function appendMessageBubble(role, content, isHtml = false, savedTime = null) {
 // ---- 历史消息重新渲染 ----
 function reRenderMessages(sessionId) {
     const history = localSessionsData[sessionId] || [];
-    messagesContainer.innerHTML = ''; // 清空并重新渲染
-    
-    let lastToolCalls = null; // 用于缓存助手调用工具时的参数
+
+    // ★ 保存当前滚动状态（在清空前精确判断用户是否在底部）
+    const savedScrollTop = messagesContainer.scrollTop;
+    const savedScrollHeight = messagesContainer.scrollHeight;
+    const savedClientHeight = messagesContainer.clientHeight;
+    // ★ 关键修复：只有容器确实有可滚动内容时，才判定"在底部"
+    // 空容器中 scrollHeight ≈ clientHeight，会导致永真误判
+    const wasAtBottom = (savedScrollHeight > savedClientHeight + 10)
+                     && (savedScrollTop + savedClientHeight >= savedScrollHeight - 2);
+
+    // ★ 禁用重建期间的自动滚动，防止 forEach 中 scrollToBottom() 干扰
+    isPinnedToBottom = false;
+
+    messagesContainer.innerHTML = ''; // 清空
+
+    // 重新挂载哨兵元素
+    scrollSentinel = document.createElement('div');
+    scrollSentinel.id = 'scroll-sentinel';
+    scrollSentinel.style.cssText = 'height:1px;width:100%;flex-shrink:0;';
+    messagesContainer.appendChild(scrollSentinel);
+
+    // 重新观察新哨兵
+    if (sentinelObserver) sentinelObserver.disconnect();
+    sentinelObserver = new IntersectionObserver(
+        (entries) => {
+            entries.forEach(entry => {
+                isPinnedToBottom = entry.isIntersecting;
+            });
+        },
+        { root: messagesContainer, threshold: 1.0 }
+    );
+    sentinelObserver.observe(scrollSentinel);
+
+    let lastToolCalls = null;
 
     history.forEach(msg => {
-        try { // 【防崩溃装甲】：独立捕获每条消息的错误，绝不影响整体
+        try {
             const rawContent = msg.content || '';
 
-            // 记录助手的 tool_calls 参数，供后面的 tool 气泡提取"输入参数"使用
             if (msg.role === 'assistant' && msg.tool_calls) {
                 lastToolCalls = msg.tool_calls;
             }
 
             if (msg.role === 'tool') {
                 if (msg.isHtml && typeof rawContent === 'string' && rawContent.includes('<details')) {
-                    // 1. 本地缓存的已包装好的 HTML，直接使用
                     appendMessageBubble(msg.role, rawContent, true, msg.time);
                 } else {
-                    // 2. 后端同步过来的原生数据，需要转换为漂亮样式的 HTML
                     let args = '{}';
                     if (Array.isArray(lastToolCalls)) {
-                        // 尝试匹配对应 id 的 tool_call
-                        const tc = lastToolCalls.find(t => 
-                            t.id === msg.tool_call_id || 
+                        const tc = lastToolCalls.find(t =>
+                            t.id === msg.tool_call_id ||
                             (t.function && t.function.name === msg.name)
                         );
                         if (tc && tc.function && tc.function.arguments) {
@@ -95,14 +154,13 @@ function reRenderMessages(sessionId) {
                         }
                     }
 
-                    // 强制拆分写法，防止代码压缩或 Markdown 解析器吞噬转义符号
                     const escHtml = (s) => String(s)
                         .replace(/&/g, "&" + "amp;")
                         .replace(/</g, "&" + "lt;")
                         .replace(/>/g, "&" + "gt;");
 
                     const htmlContent = [
-                        '<details>', 
+                        '<details>',
                         '<summary>⚙️ 工具 [', escHtml(msg.name || '未知'), '] 执行完毕 ✅</summary>',
                         '<div class="tool-section-label">📥 输入参数</div>',
                         '<pre class="tool-output tool-input">', escHtml(args), '</pre>',
@@ -110,60 +168,45 @@ function reRenderMessages(sessionId) {
                         '<pre class="tool-output">', escHtml(rawContent), '</pre>',
                         '</details>'
                     ].join('');
-                    
+
                     appendMessageBubble(msg.role, htmlContent, true, msg.time);
                 }
             } else if (msg.role === 'assistant') {
-                // 如果是只包含 tool_calls 没有 content 的"静默"过渡消息，不渲染空文本气泡
                 if (!rawContent && msg.tool_calls && msg.tool_calls.length > 0) {
-                    return; 
+                    return;
                 }
                 appendMessageBubble(msg.role, rawContent, msg.isHtml, msg.time);
             } else {
-                // user 等其他角色的消息
                 appendMessageBubble(msg.role, rawContent, msg.isHtml, msg.time);
             }
         } catch (err) {
             console.error("[前端防御] 渲染某条历史消息时出错，已自动跳过:", err, msg);
         }
     });
-    
-    scrollToBottom();
+
+    // ★ 恢复滚动位置：用双 rAF 等待浏览器完成 reflow 后再设置 scrollTop
+    requestAnimationFrame(() => {
+        requestAnimationFrame(() => {
+            if (wasAtBottom || !savedScrollHeight || savedScrollHeight <= savedClientHeight + 10) {
+                // 之前在底部 或 旧容器为空/不可滚动 → 滚到底部
+                messagesContainer.scrollTop = messagesContainer.scrollHeight;
+                isPinnedToBottom = true;
+            } else {
+                // 用户之前在某个可滚动位置 → 按比例恢复
+                const ratio = savedScrollTop / savedScrollHeight;
+                messagesContainer.scrollTop = Math.round(ratio * messagesContainer.scrollHeight);
+                isPinnedToBottom = false;
+            }
+        });
+    });
 }
 
 // ---- 智能滚动 ----
 function scrollToBottom() {
-    const threshold = 80;
-    const isNearBottom = messagesContainer.scrollHeight - messagesContainer.scrollTop - messagesContainer.clientHeight < threshold;
-    if (isNearBottom && !userManuallyScrolledUp) {
+    // 仅当用户在底部（哨兵完全可见）时才跟随滚动
+    if (isPinnedToBottom) {
         messagesContainer.scrollTop = messagesContainer.scrollHeight;
     }
-}
-
-function bindScrollListeners(container) {
-    container.addEventListener('wheel', function(e) {
-        if (e.deltaY < 0) {
-            userManuallyScrolledUp = true;
-        } else if (e.deltaY > 0) {
-            const threshold = 10;
-            const isAtBottom = container.scrollHeight - container.scrollTop - container.clientHeight < threshold;
-            if (isAtBottom) {
-                userManuallyScrolledUp = false;
-            }
-        }
-    });
-
-    container.addEventListener('scroll', function() {
-        const threshold = 10;
-        const isAtBottom = container.scrollHeight - container.scrollTop - container.clientHeight < threshold;
-        userManuallyScrolledUp = !isAtBottom;
-    });
-
-    container.addEventListener('touchmove', function() {
-        const threshold = 10;
-        const isAtBottom = container.scrollHeight - container.scrollTop - container.clientHeight < threshold;
-        userManuallyScrolledUp = !isAtBottom;
-    });
 }
 
 // ---- 会话列表渲染 ----

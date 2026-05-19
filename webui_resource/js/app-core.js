@@ -34,7 +34,7 @@ async function switchSession(sessionId) {
     // 清理上一个会话的 UI 状态
     activeAssistantMessageBubble = null;
     activeToolBubbles = {};
-    userManuallyScrolledUp = false;
+    // ★ 不强制 isPinnedToBottom = true，让哨兵根据实际滚动位置自然判断
 
     // 更新标题
     updateSessionTitle(sessionId);

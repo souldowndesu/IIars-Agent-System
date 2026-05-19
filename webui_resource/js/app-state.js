@@ -13,8 +13,6 @@ const connectionStatus = new Map();      // Map<sessionId, 'connected'|'disconne
 const isGenerating = new Map();          // Map<sessionId, boolean>
 let activeAssistantMessageBubble = null;
 let activeToolBubbles = {};
-let userManuallyScrolledUp = false;
-
 // 压缩状态
 let isCompacting = false;
 let compactEventSource = null;

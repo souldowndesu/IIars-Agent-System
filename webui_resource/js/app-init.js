@@ -25,8 +25,7 @@ document.addEventListener('DOMContentLoaded', function () {
 
     // ========== 步骤 2：绑定 UI 事件 ==========
 
-    // 滚动监听（DOM 已就绪）
-    bindScrollListeners(domRefs.messagesContainer);
+    // 滚动监听现已由 IntersectionObserver 哨兵系统接管（见 app-ui.js setupScrollSentinel）
 
     // 发送消息（按钮 + 回车键）
     domRefs.sendBtn.addEventListener('click', sendMessage);
