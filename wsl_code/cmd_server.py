@@ -1,6 +1,6 @@
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
-import pexpect
+import pexpect # pyright: ignore
 import asyncio
 import re
 import uvicorn
