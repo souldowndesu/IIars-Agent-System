@@ -10,7 +10,7 @@ dotenv.load_dotenv()
 
 logger = logging.getLogger(__name__)
 
-MAIN_DB_PATH = "database/main_chat.db"
+MAIN_DB_PATH = "database/main_messages.db"
 COMPACT_DB_PATH = "database/compact_chat.db"
 
 class ToolRegistry:
