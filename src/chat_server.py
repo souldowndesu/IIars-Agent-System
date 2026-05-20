@@ -64,7 +64,8 @@ class SessionManager:
             self.active_sessions[key] = {
                 "llm":async_llm,
                 "session_type":session_type,
-                "last_active":time.time()      #用于记录没有发生对话的时间，以便清理内存，之后也可用于llm对于时间的处理(可优化点)
+                "last_active":time.time(),      #用于记录没有发生对话的时间，以便清理内存，之后也可用于llm对于时间的处理(可优化点)
+                "is_busy":False
             }
         else:
             self.active_sessions[key]["last_active"] = time.time()
@@ -156,8 +157,15 @@ class ChatApp: #转发端口
                     active_llm = self.session_manager.active_sessions[key]["llm"]
                     active_llm.interrupt()
                 return {"status": "interrupt_sent"}
+            elif cmd == "get_status":
+                key = f"{session_id}:{session_type}"
+                is_busy = False
+                if key in self.session_manager.active_sessions:
+                    is_busy = self.session_manager.active_sessions[key]["is_busy"]
+                return {"status":"status_got","is_busy":is_busy}
             
-            return {"status": "unknown_cmd"}
+            else:
+                return {"status": "unknown_cmd"}
         
         @self.app.get("/get-history")
         async def get_history(session_id:str,session_type:str="main"):
@@ -231,8 +239,12 @@ class ChatApp: #转发端口
                     parsed_message = json.loads(message)
                 except json.JSONDecodeError:
                     logger.error("解析 message 失败，必须是合法的 JSON 字符串")
-                    return {"status": "error", "msg": "Invalid JSON message"} 
+                    return {"status":"error","msg":"Invalid JSON message"} 
             await self.session_manager.get_asyncllm(session_id,session_type)
+            
+            key = f"{session_id}:{session_type}"
+            self.session_manager.active_sessions[key]["is_busy"] = True     #标记开始，llm执行结束会自动清除
+            
             asyncio.create_task(self.llm_worker(user_input,parsed_message,session_id,session_type))
             return {"status":"started","session_id":session_id}
 
@@ -340,6 +352,10 @@ class ChatApp: #转发端口
                 "event": "error",
                 "error_msg": str(e)
             })
+        finally:
+            key = f"{session_id}:{session_type}"
+            if key in self.session_manager.active_sessions:
+                self.session_manager.active_sessions[key]["is_busy"] = False
 
 
 chat_app = ChatApp()

@@ -233,6 +233,15 @@ class AsyncLLM:
                         partial_msg["content"] = "[思考中]"
                     self.messages.append(partial_msg)
                     self.timestamps.append(time.time())
+                    #为中断时未执行的 tool_calls 补充占位 tool 回复，防止下次 API 调用报 400
+                    if "tool_calls" in partial_msg:
+                        for tc in partial_msg["tool_calls"]:
+                            self.messages.append({
+                                "role":"tool",
+                                "tool_call_id":tc["id"],
+                                "content":"[工具调用被中断]"
+                            })
+                            self.timestamps.append(time.time())
                     #追加打断记录
                     self.messages.append({
                         "role":"assistant",
