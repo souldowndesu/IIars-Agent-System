@@ -7,7 +7,7 @@ import requests
 import json
 
 logging.basicConfig(
-    level=logging.WARN,
+    level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s - %(message)s",
     datefmt="%Y-%m-%d %H:%M:%S"
 )
@@ -40,9 +40,11 @@ class TimeManager:
         logger.info("🕒 TimeManager 时间轮询已启动...")
         logger.info("🌅 执行启动系统指令...")
         self.life.start_all()
+        time.sleep(30)
         try:
             while True:
                 curr_time_str = datetime.now().strftime("%H:%M")
+                logger.info(f"正在查询，时间为 {curr_time_str}")
                 
                 with sqlite3.connect(self.db_path) as db:
                     cursor = db.execute(
@@ -82,6 +84,7 @@ class TimeManager:
         status_url = f"{self.chat_api_url}/cmd"
         params = {"session_id":session_id,"session_type":session_type,"cmd":"get_status"}
         start_wait = time.time()
+        time.sleep(5)
         
         logger.info(f"⏳ 正在检查并等待会话 {session_id} 变为空闲...")
         while True:

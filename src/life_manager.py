@@ -122,7 +122,6 @@ class LifeManager:
     def start_all(self):
         self.run_server(script_path=r"D:\Data\VS_code\AI-workplace\my-agent\src\chat_server.py",venv_dir=VENV_DIR)
         self.run_wsl_server(win_script_path=r"D:\Data\VS_code\AI-workplace\my-agent\wsl_code\cmd_server.py",conda_env=WSL_CONDA_ENV,wsl_conda_exe=WSL_CONDA_EXE)
-        self.keep_alive()
 
 if __name__ == "__main__":
     life_manager = LifeManager()

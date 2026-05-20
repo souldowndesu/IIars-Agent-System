@@ -338,7 +338,7 @@ class AsyncLLM:
             async with aiosqlite.connect(MAIN_DB_PATH) as db_main:
                 try:
                     async with db_main.execute(
-                        "SELECT message_data, created_at FROM main_messages WHERE session_id = ? AND session_type = ? AND is_compressed = 0 ORDER BY id ASC",(session_id, session_type)
+                        "SELECT message_data, created_at FROM main_messages WHERE session_id = ? AND session_type = ? AND is_compressed = 0 ORDER BY id ASC",(session_id,session_type)
                     ) as cursor:
                         rows = await cursor.fetchall()
                         for row in rows:
