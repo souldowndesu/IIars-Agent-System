@@ -374,7 +374,20 @@ class AsyncLLM:
             self._saved_index = len(self.messages)
             logger.info(f"加载 temp 类型历史记录成功，共 {len(self.messages)} 条上下文明细。")
 
-        elif session_type == "compact":         
+        elif session_type == "compact":  
+            #从compact库加载最新压缩摘要（作为历史上下文）
+            async with aiosqlite.connect(COMPACT_DB_PATH) as db_compact:
+                try:
+                    async with db_compact.execute(
+                        "SELECT message_data, end_time FROM compact_messages WHERE session_id = ? ORDER BY id DESC LIMIT 1",(session_id,)
+                    ) as cursor:
+                        row = await cursor.fetchone()
+                        if row:
+                            self.messages.append(json.loads(row[0]))
+                            self.timestamps.append(row[1])  #用结束时间作为该摘要的时间戳
+                except aiosqlite.OperationalError:
+                    logger.warning("列表未创建或无法加载")    #表还没创建时忽略    
+                       
             async with aiosqlite.connect(MAIN_DB_PATH) as db_main:
                 try:
                     async with db_main.execute(

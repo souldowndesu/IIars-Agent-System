@@ -232,6 +232,31 @@ class TimeManager:
     def alert(self,e):
         pass
     
+    def get_all_tasks(self):
+        with sqlite3.connect(self.db_path) as db:
+            cursor = db.execute(
+                "SELECT id, task_type, is_recurring, recurrence_mode, trigger_time, "
+                "next_run_time, action_cmd, task_info, session_id, session_type, triggered "
+                "FROM time_table ORDER BY next_run_time ASC"
+            )
+            rows = cursor.fetchall()
+            tasks = []
+            for r in rows:
+                tasks.append({
+                    "id":r[0],
+                    "task_type":r[1],
+                    "is_recurring":bool(r[2]),
+                    "recurrence_mode":r[3],
+                    "trigger_time":r[4],
+                    "next_run_time":r[5],
+                    "action_cmd":r[6],
+                    "task_info":r[7],
+                    "session_id":r[8],
+                    "session_type":r[9],
+                    "triggered":bool(r[10])
+                })
+            return tasks
+    
     def set_system_task(self,is_recurring:bool,mode:str,trigger_expr:str,action_cmd:str,task_info:str):
         is_rec_int = 1 if is_recurring else 0
         next_run = self._calculate_next_run(mode,trigger_expr)

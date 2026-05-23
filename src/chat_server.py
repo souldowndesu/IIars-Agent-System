@@ -11,6 +11,10 @@ import json,aiosqlite
 from chat_logic import AsyncLLM, MAIN_DB_PATH, COMPACT_DB_PATH
 import dotenv
 import logging
+from pydantic import BaseModel
+from time_manager import TimeManager
+api_time_manager = TimeManager(life_manager=None,db_path="database/time_table.db")
+
 
 dotenv.load_dotenv()
 
@@ -101,22 +105,25 @@ class StreamBroadcaster:
     def  __init__(self):
         self.clients:dict[str:list[asyncio.Queue]] = {}
         
-    async def subscribe(self,session_id:str)->asyncio.Queue:
-        if session_id not in self.clients:
-            self.clients[session_id] = []
+    async def subscribe(self,session_id:str,session_type:str)->asyncio.Queue:
+        key = f"{session_id}:{session_type}"
+        if key not in self.clients:
+            self.clients[key] = []
         queue = asyncio.Queue()
-        self.clients[session_id].append(queue)
+        self.clients[key].append(queue)
         return queue    #这个queue对象内存指向添加进去的queue对象
     
-    async def unsubscribe(self,session_id:str,queue:asyncio.Queue):
-        if session_id in self.clients and queue in self.clients[session_id]:
-            self.clients[session_id].remove(queue)
-            if not self.clients[session_id]:
-                del self.clients[session_id]
+    async def unsubscribe(self,session_id:str,queue:asyncio.Queue,session_type:str):
+        key = f"{session_id}:{session_type}"
+        if key in self.clients and queue in self.clients[key]:
+            self.clients[key].remove(queue)
+            if not self.clients[key]:
+                del self.clients[key]
     
-    async def broadcast(self,session_id,message:dict):
-        if session_id in self.clients:
-            for queue in self.clients[session_id]:
+    async def broadcast(self,session_id,message:dict,session_type:str):
+        key = f"{session_id}:{session_type}"
+        if key in self.clients:
+            for queue in self.clients[key]:
                 await queue.put(message)    #在建立联系后,所有输出内容只要进行broadcast都会同步
 
 class ChatApp: #转发端口
@@ -142,7 +149,7 @@ class ChatApp: #转发端口
         @self.app.post("/cmd")
         async def execute_cmd(session_id:str,session_type:str="main",cmd:str=""):
             if cmd == "flush": #保存数据
-                await self.session_manager.flush_save_session(session_id, session_type)
+                await self.session_manager.flush_save_session(session_id,session_type)
                 return {"status":"flushed"}
                 
             elif cmd == "refresh":  #重新加载数据
@@ -168,6 +175,45 @@ class ChatApp: #转发端口
             
             else:
                 return {"status": "unknown_cmd"}
+        
+        class TaskCreate(BaseModel):#规范路由传入，是fastapi自动解析
+            task_type:str
+            is_recurring:bool
+            recurrence_mode:str
+            trigger_time:str
+            action_cmd:str=""
+            task_info:str=""
+            session_id:str="main"
+            session_type:str="main"
+        
+        @self.app.get("/tasks")
+        def get_tasks():
+            tasks = api_time_manager.get_all_tasks()
+            return {"status":"ok","tasks":tasks}
+        @self.app.post("/tasks")
+        def create_task(task:TaskCreate):
+            if task.task_type == "system":
+                api_time_manager.set_system_task(
+                    is_recurring=task.is_recurring,
+                    mode=task.recurrence_mode,
+                    trigger_expr=task.trigger_time,
+                    action_cmd=task.action_cmd,
+                    task_info=task.task_info
+                )
+            else:
+                api_time_manager.set_agent_task(
+                    is_recurring=task.is_recurring,
+                    mode=task.recurrence_mode,
+                    trigger_expr=task.trigger_time,
+                    task_info=task.task_info,
+                    session_id=task.session_id,
+                    session_type=task.session_type
+                )
+            return {"status":"ok"}
+        @self.app.delete("/tasks/{task_id}")
+        def delete_task(task_id: int):
+            api_time_manager.delete_task(task_id)
+            return {"status":"ok"}
         
         @self.app.get("/get-history")
         async def get_history(session_id:str,session_type:str="main"):
@@ -253,7 +299,7 @@ class ChatApp: #转发端口
         @self.app.get("/stream")
         async def stream_endpoint(request:Request,session_id:str,session_type:str):
             logger.info(f"{session_id} 正在建立 SSE 连接...")
-            queue = await self.broadcaster.subscribe(session_id)   #每次接受请求，都会运行这个函数，订阅并开启event_generator
+            queue = await self.broadcaster.subscribe(session_id,session_type)   #每次接受请求，都会运行这个函数，订阅并开启event_generator
             await self.session_manager.get_asyncllm(session_id,session_type) #在input执行前就尝试加载好llm端口，降低延迟
             
             async def event_generator():    #定义一个函数,用于输出迭代器
@@ -271,8 +317,8 @@ class ChatApp: #转发端口
                     logger.info(f"{session_id} 进入 Finally，启动后台独立清理任务...")
                     async def safe_cleanup():   #设置独立的异步任务，防止因为cancelled导致保存过程被跳过
                         try:
-                            await self.broadcaster.unsubscribe(session_id,queue)
-                            await self.session_manager.save_session(session_id, session_type)
+                            await self.broadcaster.unsubscribe(session_id,queue,session_type)
+                            await self.session_manager.save_session(session_id,session_type)
                             logger.info(f"{session_id} 清理与保存任务彻底完成。")
                         except Exception as e:
                             logger.error(f"{session_id} 清理时发生致命错误: {e}")
@@ -326,7 +372,7 @@ class ChatApp: #转发端口
                 "event":"start",
                 "session_id":session_id,
                 "prompt":user_input
-                })
+                },session_type)
             self.session_manager.update_activity(session_id,session_type) 
             async for res in llm.chat_stream(user_input=user_input,message=message):
                 event_type = res.get("type")    #获取具体执行结果类型
@@ -335,13 +381,13 @@ class ChatApp: #转发端口
                     await self.broadcaster.broadcast(session_id, {
                         "event":"content",
                         "data":res["data"]
-                    })
+                    },session_type)
                 elif event_type == "tool_start":
                     await self.broadcaster.broadcast(session_id, {
                         "event":"tool_status",
                         "status":"start",
                         "name":res["name"]
-                    })
+                    },session_type)
                 elif event_type == "tool_result":
                     await self.broadcaster.broadcast(session_id, {
                         "event":"tool_status",
@@ -350,22 +396,22 @@ class ChatApp: #转发端口
                         "executed_well":res["result_status"],
                         "result_data": res.get("result_data", ""),
                         "tool_args": res.get("tool_args", "")
-                    })
+                    },session_type)
                 elif event_type == "interrupt":
                     await self.broadcaster.broadcast(session_id, {
                         "event": "interrupt"
-                    })
+                    },session_type)
                     break
             await self.broadcaster.broadcast(session_id,{
                 "event":"end",
-            })
+            },session_type)
             await llm.save_history(session_id, session_type)    #每一次对话后都同步对话
         except Exception as e:
             logger.exception(f"llm_worker 发生异常: {e}")
             await self.broadcaster.broadcast(session_id,{
                 "event": "error",
                 "error_msg": str(e)
-            })
+            },session_type)
         finally:
             key = f"{session_id}:{session_type}"
             if key in self.session_manager.active_sessions:

@@ -30,3 +30,17 @@ export interface ServerEvent {
   tool_args?: string;
   error_msg?: string;
 }
+
+export interface TimeTask {
+  id: number;
+  task_type: 'system' | 'agent';
+  is_recurring: boolean;
+  recurrence_mode: 'none' | 'daily' | 'weekly' | 'monthly';
+  trigger_time: string;
+  next_run_time: string;
+  action_cmd: string;
+  task_info: string;
+  session_id: string;
+  session_type: string;
+  triggered: boolean;
+}
