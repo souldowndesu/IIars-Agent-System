@@ -1,6 +1,8 @@
+import os
+from fastapi.staticfiles import StaticFiles
 import asyncio,uvicorn,fastapi,time,traceback
 from fastapi import FastAPI,Request
-from fastapi.responses import StreamingResponse
+from fastapi.responses import FileResponse,StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware #允许多端口
 from contextlib import asynccontextmanager
 from registry import main_registry
@@ -278,6 +280,18 @@ class ChatApp: #转发端口
                     asyncio.create_task(safe_cleanup())
                     
             return StreamingResponse(event_generator(),media_type="text/event-stream")  #会不断返回实例化的event_generator,即对应得迭代器      
+        
+        #静态挂载
+        frontend_dir = "webui_resource"
+        if os.path.exists(frontend_dir):
+            @self.app.get("/")
+            async def serve_index():
+                return FileResponse(os.path.join(frontend_dir, "index.html"))
+            self.app.mount("/", StaticFiles(directory=frontend_dir), name="static")
+            #将整个前端文件夹挂载到根目录，用来加载 js 和 css 文件
+        else:
+            logger.warning(f"未找到前端文件夹 '{frontend_dir}'，将仅提供 API 服务。")
+         
          
     @asynccontextmanager
     async def lifespan(self, app: FastAPI):#yield前会执行一次，断开服务后会执行之后的

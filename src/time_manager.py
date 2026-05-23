@@ -1,10 +1,11 @@
 from life_manager import LifeManager
 import sqlite3
 import logging
-from datetime import datetime
+from datetime import datetime,timedelta
 import time
 import requests
 import json
+import calendar
 
 logging.basicConfig(
     level=logging.INFO,
@@ -25,16 +26,80 @@ class TimeManager:
             db.execute('''
                 CREATE TABLE IF NOT EXISTS time_table (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    task_type TEXT NOT NULL,       -- 'system' 或 'agent'
-                    trigger_time TEXT NOT NULL,    -- 触发时间，如 '08:30'
-                    action_cmd TEXT,               -- system用，如 'start','end','agent'
-                    task_info TEXT,                -- agent用，对话提示词
-                    session_id TEXT,               -- agent用，会话ID
+                    task_type TEXT NOT NULL,           -- 'system' 或 'agent'
+                    is_recurring INTEGER DEFAULT 0,    -- 0: 不循环, 1: 循环
+                    recurrence_mode TEXT,              -- 循环模式：'none', 'daily', 'weekly', 'monthly'
+                    trigger_time TEXT NOT NULL,        -- 触发时间，如 '08:30' 或 '1 08:00'，对于monthly任务，负数表示倒数天数，eg.-1为最后一天
+                    next_run_time TEXT NOT NULL,       -- 系统计算出的下次绝对执行时间: "YYYY-MM-DD HH:MM"，
+                    action_cmd TEXT,                   -- system用，如 'start','end','agent'
+                    task_info TEXT,                    -- agent用，对话提示词
+                    session_id TEXT,                   -- agent用，会话ID
                     session_type TEXT DEFAULT 'main',
-                    triggered INTEGER DEFAULT 0    -- 确定是否执行，防止漏掉任务
+                    triggered INTEGER DEFAULT 0        -- 确定是否执行，防止漏掉任务
                 )
             ''')
+            db.execute("CREATE INDEX IF NOT EXISTS idx_next_run ON time_table(next_run_time, triggered);")
             db.commit()    
+    
+    def _calculate_next_run(self,mode:str,trigger_expr:str,base_time:datetime=None)->str:
+        if base_time is None:
+            base_time = datetime.now()
+        try:
+            if mode == "none":
+                #已经是绝对时间
+                return trigger_expr
+                
+            elif mode == "daily":
+                hour, minute = map(int, trigger_expr.split(":"))
+                target = base_time.replace(hour=hour, minute=minute, second=0, microsecond=0)
+                if target <= base_time: #如果今天的时间已过，算作明天
+                    target += timedelta(days=1)
+                return target.strftime("%Y-%m-%d %H:%M")
+                
+            elif mode == "weekly":
+                w_str,time_str = trigger_expr.split(" ")
+                target_w = int(w_str)
+                hour,minute = map(int,time_str.split(":"))
+                target = base_time.replace(hour=hour,minute=minute,second=0,microsecond=0)
+                
+                #计算需要向后加多少天
+                days_ahead = target_w - target.isoweekday()
+                if days_ahead < 0 or (days_ahead == 0 and target <= base_time):
+                    days_ahead += 7
+                target += timedelta(days=days_ahead)
+                return target.strftime("%Y-%m-%d %H:%M")
+                
+            elif mode == "monthly":
+                d_str,time_str = trigger_expr.split(" ")
+                target_d = int(d_str)
+                hour,minute = map(int,time_str.split(":"))
+                
+                test_year = base_time.year
+                test_month = base_time.month
+                for _ in range(24):
+                    last_day_of_month = calendar.monthrange(test_year, test_month)[1]
+                    #正数直接取，负数倒数计算 (-1表示最后一天)
+                    if target_d > 0:
+                        actual_d = target_d
+                    else:
+                        actual_d = last_day_of_month + target_d + 1
+                    #检查计算出的日期在这个月是否合法
+                    if 1 <= actual_d <= last_day_of_month:
+                        target = datetime(test_year, test_month, actual_d, hour, minute)
+                        #必须是未来时间
+                        if target > base_time:
+                            return target.strftime("%Y-%m-%d %H:%M")   
+                    # 这个月不合法或时间已过，进入下个月
+                    test_month += 1
+                    if test_month > 12:
+                        test_month = 1
+                        test_year += 1
+                        
+                raise ValueError("在未来2年中找不到符合条件的月份")
+                
+        except Exception as e:
+            logger.error(f"时间解析错误: {e}")
+            return "2099-12-31 23:59" # 返回一个遥远的时间以防死循环
     
     def start_loop(self):
         logger.info("🕒 TimeManager 时间轮询已启动...")
@@ -43,17 +108,18 @@ class TimeManager:
         time.sleep(30)
         try:
             while True:
-                curr_time_str = datetime.now().strftime("%H:%M")
+                curr_time_str = datetime.now().strftime("%Y-%m-%d %H:%M")
                 logger.info(f"正在查询，时间为 {curr_time_str}")
                 
                 with sqlite3.connect(self.db_path) as db:
                     cursor = db.execute(
-                        "SELECT id, task_type, action_cmd, task_info, session_id, session_type FROM time_table WHERE trigger_time <= ? AND triggered = 0",
+                        "SELECT id, task_type, action_cmd, task_info, session_id, session_type, is_recurring, recurrence_mode, trigger_time "
+                        "FROM time_table WHERE next_run_time <= ? AND triggered = 0",
                         (curr_time_str,)
                     )
                     tasks = cursor.fetchall()
                 for task in tasks:
-                    task_id,task_type,action_cmd,task_info,session_id,session_type = task
+                    task_id,task_type,action_cmd,task_info,session_id,session_type,is_recurring,recurrence_mode,trigger_time = task
                     logger.info(f"⚡ 触发任务 ID:{task_id} 类型:{task_type} 时间:{curr_time_str}")
 
                     if task_type == "system":
@@ -63,7 +129,13 @@ class TimeManager:
                         self.task_trigger(task_info,session_id,session_type=session_type)
                         
                     with sqlite3.connect(self.db_path) as db_update:
-                        db_update.execute("UPDATE time_table SET triggered = 1 WHERE id = ?", (task_id,))
+                        if is_recurring == 1:#循环任务，更新时间
+                            next_time = self._calculate_next_run(recurrence_mode, trigger_time)
+                            db_update.execute("UPDATE time_table SET next_run_time = ? WHERE id = ?", (next_time, task_id))
+                            logger.info(f"🔄 循环任务已重置，下次执行时间: {next_time}")
+                        else:
+                            #单次任务，直接标记为已触发
+                            db_update.execute("UPDATE time_table SET triggered = 1 WHERE id = ?", (task_id,))
                         db_update.commit()
                         
                     if session_id:
@@ -160,23 +232,27 @@ class TimeManager:
     def alert(self,e):
         pass
     
-    def set_system_task(self,trigger_time:str,action_cmd:str,task_info:str):
+    def set_system_task(self,is_recurring:bool,mode:str,trigger_expr:str,action_cmd:str,task_info:str):
+        is_rec_int = 1 if is_recurring else 0
+        next_run = self._calculate_next_run(mode,trigger_expr)
         with sqlite3.connect(self.db_path) as db:
             db.execute(
-                "INSERT INTO time_table (task_type, trigger_time, action_cmd, task_info, session_id, session_type) VALUES (?, ?, ?, ?, ?, ?)",
-                ("system",trigger_time,action_cmd,task_info,"main","main")
+                "INSERT INTO time_table (task_type, is_recurring, recurrence_mode, trigger_time, next_run_time, action_cmd, task_info, session_id, session_type) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                ("system",is_rec_int,mode,trigger_expr,next_run,action_cmd,task_info,"main","main")
             )
             db.commit()
-        logger.info(f"✅ 添加 System 任务: {trigger_time} -> {action_cmd}")
+        logger.info(f"✅添加 System 任务:模式[{mode}]规则[{trigger_expr}]->计划执行时间:{next_run}")
     
-    def set_agent_task(self,trigger_time:str,task_info:str,session_id:str,session_type:str="main"):
+    def set_agent_task(self,is_recurring:bool,mode:str,trigger_expr:str,task_info:str,session_id:str,session_type:str="main"):
+        is_rec_int = 1 if is_recurring else 0
+        next_run = self._calculate_next_run(mode,trigger_expr)
         with sqlite3.connect(self.db_path) as db:
             db.execute(
-                "INSERT INTO time_table (task_type, trigger_time, action_cmd, task_info, session_id, session_type) VALUES (?, ?, ?, ?, ?, ?)",
-                ("agent",trigger_time,"agent",task_info,session_id,session_type)
+                "INSERT INTO time_table (task_type, is_recurring, recurrence_mode, trigger_time, next_run_time, action_cmd, task_info, session_id, session_type) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                ("agent",is_rec_int,mode,trigger_expr,next_run,"agent",task_info,session_id,session_type)
             )
             db.commit()
-        logger.info(f"✅ 添加 Agent 任务: {trigger_time} -> 会话 {session_id}")
+        logger.info(f"✅添加 Agent 任务:模式[{mode}]规则[{trigger_expr}]->计划执行时间:{next_run}")
 
     def check_task(self):
         print("\n"+"="*40 +"\n📜 当前时间任务表 \n"+"="*40)
