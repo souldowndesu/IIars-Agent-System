@@ -282,7 +282,7 @@ class ChatApp: #转发端口
             return StreamingResponse(event_generator(),media_type="text/event-stream")  #会不断返回实例化的event_generator,即对应得迭代器      
         
         #静态挂载
-        frontend_dir = "webui_resource"
+        frontend_dir = "webui_react/dist"
         if os.path.exists(frontend_dir):
             @self.app.get("/")
             async def serve_index():
