@@ -356,6 +356,7 @@ async def execute(action: str, params: dict = None):
         if not course_id:
             return {"error": "bykc_sign 需要 params.course_id"}
         body = {
+            "courseId": int(course_id),
             "signType": params.get("sign_type", 1),
             "lat": params.get("lat", 0),
             "lng": params.get("lng", 0),
