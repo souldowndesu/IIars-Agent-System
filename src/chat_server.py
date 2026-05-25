@@ -5,7 +5,6 @@ from fastapi import FastAPI,Request
 from fastapi.responses import FileResponse,StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware #允许多端口
 from contextlib import asynccontextmanager
-from registry import main_registry
 
 import json,aiosqlite
 from chat_logic import AsyncLLM, MAIN_DB_PATH, COMPACT_DB_PATH
@@ -65,7 +64,7 @@ class SessionManager:
     async def get_asyncllm(self,session_id:str,session_type:str)->AsyncLLM:
         key = f"{session_id}:{session_type}"    #复合键,保存两种数据
         if key not in self.active_sessions:
-            async_llm = AsyncLLM(registry=main_registry)
+            async_llm = AsyncLLM()
             await async_llm.load_history(session_id,session_type) #首次建立连接时读取本地 json
             self.active_sessions[key] = {
                 "llm":async_llm,

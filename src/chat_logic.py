@@ -1,10 +1,10 @@
 from openai import AsyncOpenAI
-import dotenv,os,aiofiles,json,asyncio,inspect
-from typing import List,Dict,Any,Callable
-import importlib.util
+import dotenv,os,aiofiles,json
 import logging
 import aiosqlite
 import time
+from typing import List,Union
+from load_and_registry import ToolRegistry,PromptLoader,tools_dir,BASE_TOOLS
 
 dotenv.load_dotenv()
 
@@ -12,101 +12,6 @@ logger = logging.getLogger(__name__)
 
 MAIN_DB_PATH = "database/main_messages.db"
 COMPACT_DB_PATH = "database/compact_chat.db"
-
-class ToolRegistry:
-    def __init__(self):
-        self._tool_schemas:List[Dict] = []
-        self._tool_callables:Dict[str,Callable] = {}
-        
-    def register(self, tools_path: str):    #将目录内所有符合要求的tools进行注册
-        if not os.path.exists(tools_path):
-            logger.warning(f"未查询到目录: {tools_path}")
-            return
-            
-        for filename in os.listdir(tools_path):
-            if filename.endswith(".py") and not filename.startswith("__"):  #找到所有.py并去除隐藏文件
-                module_name = filename[:-3]
-                file_path = os.path.join(tools_path,filename)
-                
-                try:
-                    spec = importlib.util.spec_from_file_location(module_name,file_path) #动态加载模块
-                    module = importlib.util.module_from_spec(spec)
-                    spec.loader.exec_module(module)
-
-                    if hasattr(module,"TOOL_SCHEMA") and hasattr(module,"execute"):     #有明确格式要求，要求命名"TOOL_SCHEMA""execute"
-                        schema = getattr(module,"TOOL_SCHEMA")
-                        func = getattr(module,"execute")
-                        name = schema.get("function",{}).get("name")
-
-                        if not name:
-                            logger.error(f"{filename} 的 TOOL_SCHEMA 缺少 function.name 字段，跳过。")
-                            continue
-                        # 集中装配入库
-                        self._tool_schemas.append(schema)
-                        self._tool_callables[name] = func
-                        logger.info(f"成功扫描并装配工具: {name} (来自 {filename})")
-                    else:
-                        logger.warning(f"{filename} 缺失 TOOL_SCHEMA 或 execute，不符合协议，已跳过。")
-                except Exception as e:  
-                    logger.exception(f"动态加载模块 {filename} 时发生崩溃: {e}")
-                    continue
-    
-    def get_schema(self)->List[Dict]:
-        return self._tool_schemas if self._tool_schemas else None
-
-    async def execute(self,name:str,args:dict)->Any:    #执行对应的tool并返回
-        if name not in self._tool_callables:
-            raise ValueError(f"Tool '{name}' is not registered in this registry.")
-        func = self._tool_callables[name]
-        if inspect.iscoroutinefunction(func):
-            return await func(**args)
-        else:
-            return await asyncio.to_thread(func, **args)
-
-class PromptLoader:
-    def __init__(self,base_dir:str=None):
-        self.base_dir = base_dir or "base_prompt"
-    
-    async def get_base_prompt(self,session_type:str)->str|None:
-        prompt_dir = os.path.join(self.base_dir,session_type)
-        if not os.path.isdir(prompt_dir):
-            logger.warning(f"Prompt 目录不存在: {prompt_dir}")
-            return None
-        
-        md_files = sorted(
-            [f for f in os.listdir(prompt_dir) if f.endswith(".md")]
-        )
-        if not md_files:
-            logger.warning(f"{prompt_dir} 下未找到 .md 文件")
-            return None
-        
-        parts = []
-        for filename in md_files:
-            file_path = os.path.join(prompt_dir,filename)
-            try:
-                async with aiofiles.open(file_path,"r",encoding="utf-8") as f:
-                    content = await f.read()
-                    parts.append(content)
-                    logger.info(f"已加载 prompt 片段: {file_path}")
-            except Exception as e:
-                logger.exception(f"读取 {file_path} 失败: {e}")
-        
-        if not parts:
-            return None
-        return "\n\n".join(parts)
-    
-    async def read_skill(self,skill_path:str)->str|None:
-        if not os.path.isfile(skill_path):
-            logger.warning(f"Skill 文件不存在: {skill_path}")
-            return None
-        try:
-            async with aiofiles.open(skill_path,"r",encoding="utf-8") as f:
-                content = await f.read()
-                logger.info(f"已读取 skill: {skill_path}")
-                return content
-        except Exception as e:
-            logger.exception(f"读取 skill {skill_path} 失败: {e}")
-            return None
 
 class AsyncLLM:
     def __init__(self,api_key:str=None,model:str=None,base_url:str=None,registry:ToolRegistry=None,prompt_loader:PromptLoader=None):
@@ -123,7 +28,10 @@ class AsyncLLM:
         self.timestamps = [time.time()]
         
         self.use_tool = 1
-        self.registry = registry if self.use_tool==1 else None    #注册的tools 
+        if self.use_tool == 1: #注册的tools 
+            self.registry = registry if registry else ToolRegistry(tools_path=tools_dir,registered_tools=BASE_TOOLS)
+        else:
+            self.registry = None  
         self._saved_index = 0   #已经保存的数量,防止重复保存,标记了messages中保存过的数量
         
         self.prompt_loader =  prompt_loader or PromptLoader()
@@ -133,6 +41,28 @@ class AsyncLLM:
         self.compact_end_time = 0.0
         
         self._interrupted = False
+        
+        #主要用于处理对msg的处理，获取的msg需要在返回tool调用结果后再放入，所以这里先暂存，然后才加载
+        self._pending_messages = []
+        self._pending_timestamps = []
+    
+    #工具管理
+    def add_tool(self,tool_names:Union[str,List[str]]):
+        if self.registry:
+            self.registry.add_tool(tool_names)
+            logger.info(f"为当前会话动态添加了工具: {tool_names}")
+        else:
+            logger.warning("当前 LLM 实例未启用工具 (use_tool != 1)，无法添加工具。")
+
+    def delete_tool(self,tool_names:Union[str,List[str]]):
+        if self.registry:
+            self.registry.delete_tool(tool_names)
+            logger.info(f"为当前会话动态移除了工具: {tool_names}")
+            
+    def check_tools(self)->List[str]:
+        if self.registry:
+            return self.registry.get_active_modules()
+        return []
     
     async def load_prompt(self,prompt_type:str=None):
         prompt_text = await self.prompt_loader.get_base_prompt(prompt_type)
@@ -151,17 +81,23 @@ class AsyncLLM:
     async def load_skill(self,skill_path:str=None):
         skill_text = await self.prompt_loader.read_skill(skill_path)
         
+        msg = {"role": "system", "content": ""}
         if skill_text is None:
-            self.messages.append({"role":"system","content":f"{skill_path} 位置的skill加载失败"})
-            self.timestamps.append(time.time())
-            self._saved_index += 1
+            msg["content"] = f"{skill_path} 位置的skill加载失败"
             logger.error(f"{skill_path} 位置skill加载失败")
         else:
-            self.messages.append({"role":"system","content":skill_text})
-            self.timestamps.append(time.time())
-            self._saved_index += 1
+            msg["content"] = skill_text
             logger.info(f"已加载 {skill_path} 处的skill")
             
+        if self.messages and self.messages[-1].get("role") == "assistant" and "tool_calls" in self.messages[-1]:
+            self._pending_messages.append(msg)  #防止插入，导致openai的msg格式错误(tool后必须紧跟tool结果)
+            self._pending_timestamps.append(time.time())
+        else:
+            self.messages.append(msg)
+            self.timestamps.append(time.time())
+            self._saved_index += 1
+        
+        
     def interrupt(self):
 
         self._interrupted = True
@@ -179,7 +115,7 @@ class AsyncLLM:
                 model=self.model,
                 messages=self.messages,
                 stream=True,
-                tools=self.registry.get_schema() if self.registry else None
+                tools=self.registry.get_schema() if self.registry else None     #执行too挂载，表示可用的tools
             )
         
             full_reply = ""
@@ -281,7 +217,7 @@ class AsyncLLM:
                     
                     try:
                         args = json.loads(args_str) if args_str else {} #这里有一个防御性措施，防止非法json，也许可以调用修复模型对其进行更改
-                        result_data = await self.registry.execute(func_name,args)
+                        result_data = await self.registry.execute(func_name,args,agent=self)#传入agent自身，使其能够处理自身与使用自身的函数
                         # 对dict/list结果使用格式化JSON，便于前端在终端面板中展示
                         if isinstance(result_data, (dict, list)):
                             result_str = json.dumps(result_data,ensure_ascii=False,indent=2)
