@@ -3,7 +3,7 @@ import os
 TOOL_SCHEMA = {
     "type": "function",
     "function": {
-        "name": "tool_manager",
+        "name": "skill_manager",
         "description": "系统级管理工具：用于管理工具挂载、扫描本地文件，以及加载Skill(提示词)。在加载新工具前，先使用load_skill加载skill/tool_tree",
         "parameters": {
             "type": "object",

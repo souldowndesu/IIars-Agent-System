@@ -159,4 +159,4 @@ current_dir = os.path.dirname(os.path.abspath(__file__))
 project_root = os.path.dirname(current_dir)
 tools_dir = os.path.join(project_root,"tools")
 
-BASE_TOOLS = ["tool_manager","bash_tool"] 
+BASE_TOOLS = ["skill_manager","bash_tool"] 
