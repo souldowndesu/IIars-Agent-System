@@ -40,8 +40,44 @@ export function useChatLogic() {
       const { backendId, backendType } = getBackendParams(frontendId);
       const res = await fetch(`${BASE_URL}/get-history?session_id=${backendId}&session_type=${backendType}`);
       const data = await res.json();
+      
       if (data.status === 'ok' && data.messages) {
-        const formatted = data.messages.map((m: Partial<Message>, i: number) => ({ ...m, id: `${Date.now()}-${i}` })) as Message[];
+        
+        // 核心修复：用于暂存 assistant 发出的工具调用参数
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        let lastToolCalls: any[] = []; 
+
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const formatted = data.messages.map((m: any, i: number) => {
+          
+          // 1. 如果是助手消息，且包含工具调用，暂存起来
+          if (m.role === 'assistant' && m.tool_calls) {
+            lastToolCalls = m.tool_calls;
+          }
+
+          // 2. 如果是工具返回结果，去刚才暂存的记录里把“输入参数”提取出来缝合上
+          if (m.role === 'tool') {
+            let args = '{}';
+            if (Array.isArray(lastToolCalls)) {
+              // 通过 id 或者 name 匹配出到底是哪个工具的参数
+              const tc = lastToolCalls.find(t => t.id === m.tool_call_id || (t.function && t.function.name === m.name));
+              if (tc && tc.function && tc.function.arguments) {
+                args = tc.function.arguments;
+              }
+            }
+            
+            return {
+              ...m,
+              id: `${Date.now()}-${i}`,
+              tool_args: args,
+              status: 'success' // 历史记录中的工具调用必定是已完成状态
+            };
+          }
+
+          // 普通消息直接返回
+          return { ...m, id: `${Date.now()}-${i}` };
+        }) as Message[];
+
         setSessions(prev => {
           const newSessions = { ...prev, [frontendId]: formatted };
           localStorage.setItem('chatSessions', JSON.stringify(newSessions));
